@@ -15,3 +15,9 @@ log/*
 
 # Cloned MuJoCo src
 mujoco_ros2_control/mujoco/*
+
+# workspace hygiene: claude / editor / caches
+.claude/
+.vscode/
+.cache/
+__pycache__/
