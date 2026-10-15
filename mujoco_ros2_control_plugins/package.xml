@@ -27,6 +27,10 @@
   <depend>std_msgs</depend>
   <depend>geometry_msgs</depend>
   <depend>visualization_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>trajectory_msgs</depend>
+  <depend>std_srvs</depend>
+  <depend>tf2_msgs</depend>
   <depend>mujoco_ros2_control_msgs</depend>
 
   <test_depend>ament_cmake_gtest</test_depend>

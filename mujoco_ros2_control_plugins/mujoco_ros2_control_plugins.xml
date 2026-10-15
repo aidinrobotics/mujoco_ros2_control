@@ -18,4 +18,21 @@
       Multiple concurrent wrenches on different or the same bodies are supported.
     </description>
   </class>
+  <class name="mujoco_ros2_control_plugins/JointCommandPlugin"
+         type="mujoco_ros2_control_plugins::JointCommandPlugin"
+         base_class_type="mujoco_ros2_control_plugins::MuJoCoROS2ControlPluginBase">
+    <description>
+      Drives MuJoCo position actuators of joints that are not under ros2_control, from
+      sensor_msgs/JointState targets (speed-limited) or trajectory_msgs/JointTrajectory, and
+      publishes their sensor_msgs/JointState.
+    </description>
+  </class>
+  <class name="mujoco_ros2_control_plugins/MagnetGripperPlugin"
+         type="mujoco_ros2_control_plugins::MagnetGripperPlugin"
+         base_class_type="mujoco_ros2_control_plugins::MuJoCoROS2ControlPluginBase">
+    <description>
+      Magnet gripper: magnet_on (std_srvs/Trigger) attaches the plate within attach_distance of the magnet cell
+      geoms by activating its gripper-plate weld; magnet_off releases it with gravity and contacts.
+    </description>
+  </class>
 </library>

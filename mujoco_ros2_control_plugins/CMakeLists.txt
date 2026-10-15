@@ -13,6 +13,10 @@ find_package(realtime_tools REQUIRED)
 find_package(pluginlib REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(visualization_msgs REQUIRED)
+find_package(sensor_msgs REQUIRED)
+find_package(trajectory_msgs REQUIRED)
+find_package(std_srvs REQUIRED)
+find_package(tf2_msgs REQUIRED)
 find_package(mujoco_ros2_control_msgs REQUIRED)
 
 # Attempt to link MuJoCo via the vendor package, if available
@@ -30,6 +34,8 @@ endif()
 add_library(mujoco_ros2_control_plugins SHARED
   src/heartbeat_publisher_plugin.cpp
   src/external_wrench_plugin.cpp
+  src/joint_command_plugin.cpp
+  src/magnet_gripper_plugin.cpp
 )
 target_include_directories(mujoco_ros2_control_plugins PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -46,6 +52,10 @@ target_link_libraries(mujoco_ros2_control_plugins PUBLIC
   pluginlib::pluginlib
   ${std_msgs_TARGETS}
   ${visualization_msgs_TARGETS}
+  ${sensor_msgs_TARGETS}
+  ${trajectory_msgs_TARGETS}
+  ${std_srvs_TARGETS}
+  ${tf2_msgs_TARGETS}
   ${mujoco_ros2_control_msgs_TARGETS}
 )
 target_compile_definitions(mujoco_ros2_control_plugins PRIVATE
@@ -93,7 +103,7 @@ install(DIRECTORY include/
 pluginlib_export_plugin_description_file(mujoco_ros2_control_plugins mujoco_ros2_control_plugins.xml)
 
 ament_export_include_directories(include)
-ament_export_dependencies(mujoco_vendor rclcpp realtime_tools pluginlib std_msgs visualization_msgs mujoco_ros2_control_msgs ros2_control_cmake)
+ament_export_dependencies(mujoco_vendor rclcpp realtime_tools pluginlib std_msgs visualization_msgs sensor_msgs trajectory_msgs std_srvs tf2_msgs mujoco_ros2_control_msgs ros2_control_cmake)
 ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)
 
 ament_package()
