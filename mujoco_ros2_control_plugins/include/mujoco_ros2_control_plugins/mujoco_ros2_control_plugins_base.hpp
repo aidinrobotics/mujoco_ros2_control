@@ -15,6 +15,8 @@
 #ifndef MUJOCO_ROS2_CONTROL_PLUGINS__PLUGIN_BASE_HPP_
 #define MUJOCO_ROS2_CONTROL_PLUGINS__PLUGIN_BASE_HPP_
 
+#include <mutex>
+
 #include <mujoco/mujoco.h>
 #include <rclcpp/rclcpp.hpp>
 
@@ -61,6 +63,20 @@ public:
    * @brief Cleanup the plugin
    */
   virtual void cleanup() = 0;
+
+  /**
+   * @brief Give the plugin the simulation mutex (held by the physics thread while it steps).
+   * @note update() runs in the control thread without it. A plugin that changes the physics mjData or the model in a
+   * way mj_step must not see half-done (e.g. toggling eq_active between constraint counting and allocation) locks it
+   * around that change. Called once after a successful init().
+   */
+  virtual void set_sim_mutex(std::recursive_mutex* mutex)
+  {
+    sim_mutex_ = mutex;
+  }
+
+protected:
+  std::recursive_mutex* sim_mutex_{ nullptr };
 };
 
 }  // namespace mujoco_ros2_control_plugins

@@ -22,6 +22,7 @@
 #include <fmt/compile.h>
 #include <fmt/ranges.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -499,6 +500,9 @@ MujocoSystemInterface::on_init(const hardware_interface::HardwareComponentInterf
   cameras_ = std::make_unique<MujocoCameras>(get_node(), &simulation_->mutex(), simulation_->data(),
                                              simulation_->model(), camera_publish_rate);
   cameras_->register_cameras(get_hardware_info());
+  // Depth noise (mm, 1 sigma at 3 m, scaled with z^2). Default 0 = noise-free depth as before.
+  cameras_->set_depth_noise(
+      std::stod(get_hardware_parameter(get_hardware_info(), "camera_depth_noise_mm").value_or("0.0")));
 
   // Configure Lidar sensors
   RCLCPP_INFO(get_logger(), "Initializing lidar...");
@@ -1122,7 +1126,7 @@ hardware_interface::return_type MujocoSystemInterface::write(const rclcpp::Time&
                          : 0;
     for (auto& actuator : mujoco_actuator_data_)
     {
-      if (actuator.actuator_type == ActuatorType::PASSIVE)
+      if (actuator.actuator_type == ActuatorType::PASSIVE || !actuator.is_exposed_to_ros2_control)
       {
         continue;
       }
@@ -1138,7 +1142,7 @@ hardware_interface::return_type MujocoSystemInterface::write(const rclcpp::Time&
   // TODO: Support command limits. For now those ranges can be limited in the MuJoCo actuators themselves.
   for (auto& actuator : mujoco_actuator_data_)
   {
-    if (actuator.actuator_type == ActuatorType::PASSIVE)
+    if (actuator.actuator_type == ActuatorType::PASSIVE || !actuator.is_exposed_to_ros2_control)
     {
       continue;
     }
@@ -1337,6 +1341,23 @@ bool MujocoSystemInterface::register_mujoco_actuators()
       return false;
     }
     actuator_data.mj_actuator_id = i;
+    {
+      // Only actuators whose joint appears in the <ros2_control> block (directly or through a
+      // transmission) get ctrl written by write(). The rest are left to MuJoCo plugins.
+      const auto& info = get_hardware_info();
+      bool exposed = std::any_of(info.joints.begin(), info.joints.end(),
+                                 [&](const auto& j) { return j.name == actuator_data.joint_name; });
+      for (const auto& transmission : info.transmissions)
+      {
+        exposed = exposed || std::any_of(transmission.actuators.begin(), transmission.actuators.end(),
+                                         [&](const auto& a) { return a.name == actuator_data.joint_name; });
+      }
+      actuator_data.is_exposed_to_ros2_control = exposed;
+      RCLCPP_INFO_EXPRESSION(get_logger(), !exposed,
+                             "MuJoCo actuator for joint '%s' is not in <ros2_control>; its ctrl is left to "
+                             "MuJoCo plugins.",
+                             actuator_data.joint_name.c_str());
+    }
     actuator_data.mj_pos_adr = simulation_->model()->jnt_qposadr[target_id];
     actuator_data.mj_vel_adr = simulation_->model()->jnt_dofadr[target_id];
     actuator_data.mj_joint_type = simulation_->model()->jnt_type[target_id];
@@ -2282,6 +2303,7 @@ void MujocoSystemInterface::load_mujoco_plugins()
         auto plugin = plugin_loader_->createSharedInstance(plugin_type);
         if (plugin->init(get_node()->create_sub_node(plugin_name), simulation_->model(), simulation_->data()))
         {
+          plugin->set_sim_mutex(&simulation_->mutex());
           plugin_instances_.push_back(plugin);
           RCLCPP_INFO(get_logger(), "Successfully loaded and initialized plugin: %s", plugin_name.c_str());
         }

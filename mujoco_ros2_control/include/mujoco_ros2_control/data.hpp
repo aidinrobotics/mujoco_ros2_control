@@ -113,6 +113,11 @@ struct MuJoCoActuatorData
   bool has_pos_pid{ false };
   bool has_vel_pid{ false };
 
+  // False when the actuator's joint is not listed in the <ros2_control> block (nor driven by a
+  // transmission). write() then leaves its ctrl alone so something else (e.g. a MuJoCo ROS 2
+  // plugin) can drive it — lets one MJCF hold a robot that is not under this controller manager.
+  bool is_exposed_to_ros2_control{ true };
+
   // N-step transport delay ring buffer for position commands. Sized once
   // on the first write() when the control period is known. Empty = delay
   // disabled (default).
