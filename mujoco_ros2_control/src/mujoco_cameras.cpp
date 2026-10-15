@@ -18,6 +18,8 @@
  */
 
 #include "mujoco_ros2_control/mujoco_cameras.hpp"
+
+#include <algorithm>
 #include "mujoco_ros2_control/utils.hpp"
 
 #include "sensor_msgs/image_encodings.hpp"
@@ -35,6 +37,21 @@ MujocoCameras::MujocoCameras(rclcpp::Node::SharedPtr node, std::recursive_mutex*
   , mj_model_(mujoco_model)
   , camera_publish_rate_(camera_publish_rate)
 {
+}
+
+void MujocoCameras::set_depth_noise(double sigma_mm_at_3m)
+{
+  depth_noise_mm_at_3m_ = std::max(0.0, sigma_mm_at_3m);
+  if (depth_noise_mm_at_3m_ > 0.0 && noise_table_.empty())
+  {
+    noise_table_.resize(1u << 22);
+    std::normal_distribution<float> n01(0.0f, 1.0f);
+    for (auto& v : noise_table_)
+    {
+      v = n01(noise_rng_);
+    }
+  }
+  RCLCPP_INFO(node_->get_logger(), "Camera depth noise: %.3f mm (1 sigma) at 3 m, scaled with z^2", depth_noise_mm_at_3m_);
 }
 
 void MujocoCameras::register_cameras(const hardware_interface::HardwareInfo& hardware_info)
@@ -233,14 +250,23 @@ void MujocoCameras::update()
   {
     // Fix non-linear projections in the depth image and flip the data.
     // https://github.com/google-deepmind/mujoco/blob/3.4.0/python/mujoco/renderer.py#L190
+    const bool noisy = depth_noise_mm_at_3m_ > 0.0 && !noise_table_.empty();
+    const size_t n_table = noise_table_.size();
+    const size_t offset = noisy ? std::uniform_int_distribution<size_t>(0, n_table - 1)(noise_rng_) : 0;
+    const float k_noise = static_cast<float>(depth_noise_mm_at_3m_ * 1e-3 / 9.0);   // sigma [m] = k * z^2
     for (uint32_t h = 0; h < camera.height; h++)
     {
       for (uint32_t w = 0; w < camera.width; w++)
       {
         auto idx = h * camera.width + w;
         auto idx_flipped = (camera.height - 1 - h) * camera.width + w;
-        camera.depth_buffer[idx] = near / (1.0f - camera.depth_buffer[idx] * (depth_scale));
-        camera.depth_buffer_flipped[idx_flipped] = camera.depth_buffer[idx];
+        float z = near / (1.0f - camera.depth_buffer[idx] * (depth_scale));
+        if (noisy && z < 0.99f * far)   // leave the background (far plane) alone
+        {
+          z += k_noise * z * z * noise_table_[(offset + idx) % n_table];
+        }
+        camera.depth_buffer[idx] = z;
+        camera.depth_buffer_flipped[idx_flipped] = z;
       }
     }
     // Copy flipped data into the depth image message, floats -> unsigned chars

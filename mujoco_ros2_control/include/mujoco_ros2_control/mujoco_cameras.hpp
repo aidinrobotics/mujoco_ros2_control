@@ -21,6 +21,7 @@
 
 #include <atomic>
 #include <mutex>
+#include <random>
 #include <thread>
 #include <vector>
 
@@ -100,6 +101,12 @@ public:
    */
   void register_cameras(const hardware_interface::HardwareInfo& hardware_info);
 
+  /**
+   * @brief Adds Gaussian noise to every depth image: sigma(z) = sigma_mm_at_3m * (z / 3 m)^2 (structured-light
+   * depth noise grows with z^2; Mech-Eye LSR L-GL spec: 0.5 mm 1-sigma at 3.0 m). 0 = off (default).
+   */
+  void set_depth_noise(double sigma_mm_at_3m);
+
 private:
   /**
    * @brief Initializes the rendering context and starts processing.
@@ -122,6 +129,12 @@ private:
 
   // Image publishing rate
   double camera_publish_rate_;
+
+  // Depth noise: precomputed N(0,1) table read from a random offset each frame (sampling ~60 M normals/s for
+  // four 2048x1536 cameras at 5 Hz would cost seconds of CPU per second).
+  double depth_noise_mm_at_3m_{ 0.0 };
+  std::vector<float> noise_table_;
+  std::mt19937 noise_rng_{ 12345 };
 
   // Rendering options for the cameras, currently hard coded to defaults
   mjvOption mjv_opt_;
