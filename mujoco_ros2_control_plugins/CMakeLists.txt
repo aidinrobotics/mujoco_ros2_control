@@ -17,6 +17,7 @@ find_package(sensor_msgs REQUIRED)
 find_package(trajectory_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
 find_package(tf2_msgs REQUIRED)
+find_package(rcl_interfaces REQUIRED)
 find_package(mujoco_ros2_control_msgs REQUIRED)
 
 # Attempt to link MuJoCo via the vendor package, if available
@@ -57,6 +58,7 @@ target_link_libraries(mujoco_ros2_control_plugins PUBLIC
   ${trajectory_msgs_TARGETS}
   ${std_srvs_TARGETS}
   ${tf2_msgs_TARGETS}
+  ${rcl_interfaces_TARGETS}
   ${mujoco_ros2_control_msgs_TARGETS}
 )
 target_compile_definitions(mujoco_ros2_control_plugins PRIVATE

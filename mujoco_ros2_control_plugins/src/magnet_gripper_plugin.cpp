@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <limits>
 
 #include <pluginlib/class_list_macros.hpp>
@@ -59,6 +60,20 @@ bool MagnetGripperPlugin::init(rclcpp::Node::SharedPtr node, const mjModel* m, m
   released_sphere_ = declare_or_get<std::vector<int64_t>>(node_, "released_sphere", { 8, 0 });
   frozen_zone_ = declare_or_get<std::vector<double>>(node_, "frozen_zone", std::vector<double>{});
   frozen_bits_ = declare_or_get<std::vector<int64_t>>(node_, "frozen_bits", { 32, 0 });
+  carried_piece_ = declare_or_get<std::vector<int64_t>>(node_, "carried_piece", { 0, 0 });
+  carried_sphere_ = declare_or_get<std::vector<int64_t>>(node_, "carried_sphere", { 0, 0 });
+  carried_gravcomp_ = declare_or_get<double>(node_, "carried_gravcomp", 1.0);
+  min_cells_ = static_cast<int>(declare_or_get<int64_t>(node_, "min_cells", 1));
+  warn_distance_ = declare_or_get<double>(node_, "warn_distance", 0.03);
+  check_period_ = declare_or_get<double>(node_, "check_period", 0.2);
+  const auto spring_joint = declare_or_get<std::string>(node_, "spring_joint", "");
+  const auto cells_name = declare_or_get<std::string>(node_, "cells_service", "magnet_cells");
+  const auto cells_state_name = declare_or_get<std::string>(node_, "cells_state_topic", "magnet_cells_state");
+  if (carried_piece_.size() != 2 || carried_sphere_.size() != 2)
+  {
+    RCLCPP_ERROR(logger_, "MagnetGripperPlugin: carried_piece / carried_sphere need [contype, conaffinity].");
+    return false;
+  }
   if (!frozen_zone_.empty() && frozen_zone_.size() != 4)
   {
     RCLCPP_ERROR(logger_, "MagnetGripperPlugin: frozen_zone needs [xmin, xmax, ymin, ymax].");
@@ -86,6 +101,19 @@ bool MagnetGripperPlugin::init(rclcpp::Node::SharedPtr node, const mjModel* m, m
       return false;
     }
     cell_geoms_.push_back(g);
+    const auto us = c.rfind('_');
+    cell_names_.push_back("cell" + (us == std::string::npos ? std::to_string(cell_geoms_.size() - 1) : c.substr(us + 1)));
+  }
+  enabled_.assign(cell_geoms_.size(), 1);
+  if (!spring_joint.empty())
+  {
+    const int j = mj_name2id(m, mjOBJ_JOINT, spring_joint.c_str());
+    if (j < 0)
+    {
+      RCLCPP_ERROR(logger_, "MagnetGripperPlugin: spring_joint '%s' not found.", spring_joint.c_str());
+      return false;
+    }
+    spring_qadr_ = m->jnt_qposadr[j];
   }
   if (cell_geoms_.empty())
   {
@@ -114,14 +142,62 @@ bool MagnetGripperPlugin::init(rclcpp::Node::SharedPtr node, const mjModel* m, m
   on_srv_ = node_->create_service<std_srvs::srv::Trigger>(
       on_name, [this](const std::shared_ptr<std_srvs::srv::Trigger::Request>,
                       std::shared_ptr<std_srvs::srv::Trigger::Response> res) {
-        std::tie(res->success, res->message) = call(true);
+        std::tie(res->success, res->message) = call(Cmd::On);
       });
   off_srv_ = node_->create_service<std_srvs::srv::Trigger>(
       off_name, [this](const std::shared_ptr<std_srvs::srv::Trigger::Request>,
                        std::shared_ptr<std_srvs::srv::Trigger::Response> res) {
-        std::tie(res->success, res->message) = call(false);
+        std::tie(res->success, res->message) = call(Cmd::Off);
+      });
+  // Cell selection: SetParameters with one parameter "channels" (integer_array / bool_array of 0/1 in channel order,
+  // or a string "1,1,0,1"). A standard type so that nothing here depends on the cell's own message package.
+  using SetParameters = rcl_interfaces::srv::SetParameters;
+  cells_srv_ = node_->create_service<SetParameters>(
+      cells_name, [this](const std::shared_ptr<SetParameters::Request> req, std::shared_ptr<SetParameters::Response> res) {
+        rcl_interfaces::msg::SetParametersResult r;
+        std::vector<int> ch;
+        bool found = false;
+        for (const auto& p : req->parameters)
+        {
+          if (p.name != "channels")
+          {
+            continue;
+          }
+          found = true;
+          const auto& v = p.value;
+          if (v.type == rcl_interfaces::msg::ParameterType::PARAMETER_INTEGER_ARRAY)
+          {
+            for (auto x : v.integer_array_value)
+              ch.push_back(x != 0);
+          }
+          else if (v.type == rcl_interfaces::msg::ParameterType::PARAMETER_BOOL_ARRAY)
+          {
+            for (auto x : v.bool_array_value)
+              ch.push_back(x ? 1 : 0);
+          }
+          else if (v.type == rcl_interfaces::msg::ParameterType::PARAMETER_STRING)
+          {
+            for (char c : v.string_value)
+            {
+              if (c == '0' || c == '1')
+                ch.push_back(c - '0');
+            }
+          }
+        }
+        if (!found || ch.size() != cell_geoms_.size())
+        {
+          r.successful = false;
+          r.reason = "need parameter 'channels' with " + std::to_string(cell_geoms_.size()) +
+                     " values 0/1 (channel order ch0..)";
+        }
+        else
+        {
+          std::tie(r.successful, r.reason) = call(Cmd::Cells, ch);
+        }
+        res->results.assign(std::max<std::size_t>(1, req->parameters.size()), r);
       });
   state_pub_ = node_->create_publisher<std_msgs::msg::String>(state_name, rclcpp::QoS(1).transient_local());
+  cells_state_pub_ = node_->create_publisher<std_msgs::msg::String>(cells_state_name, rclcpp::QoS(1).transient_local());
   scratch_ = mj_makeData(m);
   tf_pub_ = node_->create_publisher<tf2_msgs::msg::TFMessage>("/tf", 10);
   for (int b : plate_bodies_)
@@ -132,13 +208,22 @@ bool MagnetGripperPlugin::init(rclcpp::Node::SharedPtr node, const mjModel* m, m
     tf_msg_.transforms.push_back(t);
   }
 
-  RCLCPP_INFO(logger_, "MagnetGripperPlugin: gripper '%s', %zu cells, %zu plates ('%s*'). on=%s off=%s state=%s",
-              gripper.c_str(), cell_geoms_.size(), plate_bodies_.size(), prefix.c_str(), on_srv_->get_service_name(),
-              off_srv_->get_service_name(), state_pub_->get_topic_name());
+  std::string order;
+  for (std::size_t k = 0; k < cell_geoms_.size(); ++k)
+  {
+    order += (k ? " " : "") + cell_label(k);
+  }
+  RCLCPP_INFO(logger_,
+              "MagnetGripperPlugin: gripper '%s', %zu cells [%s], %zu plates ('%s*'). on=%s off=%s state=%s cells=%s "
+              "cells_state=%s, carried bits piece %ld/%ld sphere %ld/%ld gravcomp %.1f, spring %s",
+              gripper.c_str(), cell_geoms_.size(), order.c_str(), plate_bodies_.size(), prefix.c_str(),
+              on_srv_->get_service_name(), off_srv_->get_service_name(), state_pub_->get_topic_name(),
+              cells_srv_->get_service_name(), cells_state_pub_->get_topic_name(), carried_piece_[0], carried_piece_[1],
+              carried_sphere_[0], carried_sphere_[1], carried_gravcomp_, spring_qadr_ >= 0 ? spring_joint.c_str() : "-");
   return true;
 }
 
-std::pair<bool, std::string> MagnetGripperPlugin::call(bool on)
+std::pair<bool, std::string> MagnetGripperPlugin::call(Cmd cmd, std::vector<int> channels)
 {
   std::future<std::pair<bool, std::string>> fut;
   {
@@ -147,7 +232,7 @@ std::pair<bool, std::string> MagnetGripperPlugin::call(bool on)
     {
       return { false, "previous magnet request still pending" };
     }
-    pending_.emplace(Request{ on, {} });
+    pending_.emplace(Request{ cmd, std::move(channels), {} });
     fut = pending_->result.get_future();
   }
   if (fut.wait_for(std::chrono::seconds(5)) != std::future_status::ready)
@@ -189,39 +274,28 @@ std::pair<bool, std::string> MagnetGripperPlugin::attach(const mjModel* m, mjDat
   {
     return { false, std::string("already holding ") + mj_id2name(m, mjOBJ_BODY, carried_) };
   }
-  // Measure on a private mjData: mj_ray / mj_kinematics must not touch the physics data's state or arena.
-  mju_copy(scratch_->qpos, d->qpos, m->nq);
-  mj_kinematics(m, scratch_);
   // Each cell shoots a ray out of its face along the tool axis (gripper body +X); the first thing it hits must be a
   // plate within attach_distance. Closest-geometry distance also caught a neighbouring plate's raised edge next to
-  // the face (tilted ga1_03 beside ga2_04) and welded that plate at a large offset. The plate under the most cells
-  // wins, ties broken by the smallest gap.
-  const mjtNum* gx = scratch_->xmat + 9 * gripper_body_;
-  const mjtNum dir[3] = { gx[0], gx[3], gx[6] };
+  // the face (tilted ga1_03 beside ga2_04) and welded that plate at a large offset. Only ENABLED cells count; the plate
+  // under the most of them wins, ties broken by the smallest gap.
+  const auto hits = cast_cells(m, d);
   std::vector<int> n_cells(m->nbody, 0);
   std::vector<mjtNum> gap(m->nbody, std::numeric_limits<mjtNum>::infinity());
-  for (int c : cell_geoms_)
+  int n_enabled = 0;
+  for (std::size_t k = 0; k < hits.size(); ++k)
   {
-    // centre -> face distance along dir (box half extents projected on dir)
-    const mjtNum* cx = scratch_->geom_xmat + 9 * c;
-    mjtNum half = 0;
-    for (int k = 0; k < 3; ++k)
-    {
-      half += m->geom_size[3 * c + k] * std::abs(cx[k] * dir[0] + cx[3 + k] * dir[1] + cx[6 + k] * dir[2]);
-    }
-    int hit = -1;
-    const mjtNum dist = mj_ray(m, scratch_, scratch_->geom_xpos + 3 * c, dir, nullptr, 1, gripper_body_, &hit);
-    if (hit < 0 || dist < 0 || dist - half > attach_distance_)
+    n_enabled += enabled_[k];
+    const auto& h = hits[k];
+    if (!enabled_[k] || h.body < 0 || h.gap > attach_distance_ || !is_plate(h.body))
     {
       continue;
     }
-    const int b = m->geom_bodyid[hit];
-    if (std::find(plate_bodies_.begin(), plate_bodies_.end(), b) == plate_bodies_.end())
-    {
-      continue;
-    }
-    ++n_cells[b];
-    gap[b] = std::min(gap[b], dist - half);
+    ++n_cells[h.body];
+    gap[h.body] = std::min<mjtNum>(gap[h.body], h.gap);
+  }
+  if (n_enabled == 0)
+  {
+    return { false, "no magnet cell enabled (" + channels_text() + ")" };
   }
   int best = -1;
   for (int b : plate_bodies_)
@@ -234,7 +308,13 @@ std::pair<bool, std::string> MagnetGripperPlugin::attach(const mjModel* m, mjDat
   }
   if (best < 0)
   {
-    return { false, "no plate within " + std::to_string(attach_distance_ * 1e3) + " mm in front of the magnet cells" };
+    return { false, "no plate within " + std::to_string(attach_distance_ * 1e3) +
+                        " mm in front of the enabled magnet cells (" + channels_text() + ")" };
+  }
+  if (n_cells[best] < min_cells_)
+  {
+    return { false, std::string("only ") + std::to_string(n_cells[best]) + " enabled cell(s) on " +
+                        mj_id2name(m, mjOBJ_BODY, best) + " (min_cells " + std::to_string(min_cells_) + ")" };
   }
   const int best_cells = n_cells[best];
   const mjtNum best_dist = gap[best];
@@ -255,15 +335,41 @@ std::pair<bool, std::string> MagnetGripperPlugin::attach(const mjModel* m, mjDat
   mju_mulQuat(ed + 6, q1i, q2);
   ed[10] = 1.0;
 
-  // Weightless and contact-free while carried; nothing else acts on it.
-  mm->body_gravcomp[best] = 1.0;
-  set_plate_contacts(m, best, 0, 0, 0, 0);
+  // While carried: carried_gravcomp (1 = weightless) and carried_* contact bits (default none).
+  mm->body_gravcomp[best] = carried_gravcomp_;
+  set_plate_contacts(m, best, static_cast<int>(carried_piece_[0]), static_cast<int>(carried_piece_[1]),
+                     static_cast<int>(carried_sphere_[0]), static_cast<int>(carried_sphere_[1]));
   carried_eq_ = eq;
   phys_data_->eq_active[eq] = 1;
   carried_ = best;
   const std::string name = mj_id2name(m, mjOBJ_BODY, best);
-  RCLCPP_INFO(logger_, "magnet ON: %s (%d/%zu cells, gap %.1f mm)", name.c_str(), best_cells, cell_geoms_.size(),
-              std::max<mjtNum>(best_dist, 0) * 1e3);
+  // which enabled cells hold it, which are off the plate, which are over another plate
+  on_plate_text_.clear();
+  std::string off_plate;
+  for (std::size_t k = 0; k < hits.size(); ++k)
+  {
+    if (!enabled_[k])
+      continue;
+    if (hits[k].body == best && hits[k].gap <= attach_distance_)
+      on_plate_text_ += (on_plate_text_.empty() ? "" : ",") + cell_label(k);
+    else
+      off_plate += (off_plate.empty() ? "" : ",") + cell_label(k);
+  }
+  warned_.clear();
+  spring_max_ = 0.0;
+  warn_text_ = check_neighbours(m, hits, best, true);
+  RCLCPP_INFO(logger_, "magnet ON: %s (%d/%d enabled cells: %s, gap %.1f mm; %s)", name.c_str(), best_cells, n_enabled,
+              on_plate_text_.c_str(), std::max<mjtNum>(best_dist, 0) * 1e3, channels_text().c_str());
+  if (!off_plate.empty())
+  {
+    RCLCPP_WARN(logger_, "magnet ON: enabled cell(s) %s not on %s (off the plate — turn them off)", off_plate.c_str(),
+                name.c_str());
+  }
+  if (best_cells < 2)
+  {
+    RCLCPP_WARN(logger_, "magnet ON: %s held by %d cell only (real gripper: 200 kg/cell, at least 2 cells)",
+                name.c_str(), best_cells);
+  }
   return { true, name };
 }
 
@@ -294,7 +400,12 @@ std::pair<bool, std::string> MagnetGripperPlugin::release(const mjModel* m)
                        static_cast<int>(released_sphere_.at(0)), static_cast<int>(released_sphere_.at(1)));
   }
   carried_ = -1;
-  RCLCPP_INFO(logger_, "magnet OFF: released %s%s", name.c_str(), frozen ? " (frozen zone: kept static on the stack)" : "");
+  on_plate_text_.clear();
+  warn_text_.clear();
+  warned_.clear();
+  RCLCPP_INFO(logger_, "magnet OFF: released %s%s (spring max %.1f mm while held)", name.c_str(),
+              frozen ? " (frozen zone: kept static on the stack)" : "", spring_max_ * 1e3);
+  spring_max_ = 0.0;
   return { true, name };
 }
 
@@ -313,7 +424,20 @@ void MagnetGripperPlugin::update(const mjModel* m, mjData* d)
         sim_lock = std::unique_lock<std::recursive_mutex>(*sim_mutex_);
       }
       mjData* pd = sim_mutex_ ? phys_data_ : d;
-      pending_->result.set_value(pending_->on ? attach(m, pd) : release(m));
+      std::pair<bool, std::string> r;
+      switch (pending_->cmd)
+      {
+        case Cmd::On:
+          r = attach(m, pd);
+          break;
+        case Cmd::Off:
+          r = release(m);
+          break;
+        case Cmd::Cells:
+          r = set_channels(m, pending_->channels);
+          break;
+      }
+      pending_->result.set_value(r);
       pending_.reset();
     }
   }
@@ -338,13 +462,142 @@ void MagnetGripperPlugin::update(const mjModel* m, mjData* d)
     tf_pub_->publish(tf_msg_);
   }
 
+  if (spring_qadr_ >= 0)
+  {
+    spring_max_ = std::max<double>(spring_max_, d->qpos[spring_qadr_]);
+  }
+  // while holding: enabled cells over another plate (a neighbouring / lower plate the magnet would pull)
+  if (carried_ >= 0 && check_period_ > 0 && (d->time - last_check_ >= check_period_ || d->time < last_check_))
+  {
+    last_check_ = d->time;
+    warn_text_ = check_neighbours(m, cast_cells(m, d), carried_, false);
+  }
+
   if (d->time - last_state_pub_ >= 0.1 || d->time < last_state_pub_)
   {
     last_state_pub_ = d->time;
     std_msgs::msg::String msg;
     msg.data = carried_ >= 0 ? mj_id2name(m, mjOBJ_BODY, carried_) : "";
     state_pub_->publish(msg);
+    char buf[96];
+    std::snprintf(buf, sizeof(buf), " spring_mm=%.2f max_mm=%.2f",
+                  spring_qadr_ >= 0 ? d->qpos[spring_qadr_] * 1e3 : 0.0, spring_max_ * 1e3);
+    std_msgs::msg::String cs;
+    cs.data = "channels=" + channels_text() + " held=" + msg.data + " on_plate=" + on_plate_text_ + buf +
+              " warn=" + warn_text_;
+    cells_state_pub_->publish(cs);
   }
+}
+
+std::vector<MagnetGripperPlugin::CellHit> MagnetGripperPlugin::cast_cells(const mjModel* m, const mjData* d)
+{
+  // Measure on a private mjData: mj_ray / mj_kinematics must not touch the physics data's state or arena.
+  mju_copy(scratch_->qpos, d->qpos, m->nq);
+  mj_kinematics(m, scratch_);
+  const mjtNum* gx = scratch_->xmat + 9 * gripper_body_;
+  const mjtNum dir[3] = { gx[0], gx[3], gx[6] };
+  std::vector<CellHit> out(cell_geoms_.size());
+  for (std::size_t k = 0; k < cell_geoms_.size(); ++k)
+  {
+    const int c = cell_geoms_[k];
+    // centre -> face distance along dir (box half extents projected on dir)
+    const mjtNum* cx = scratch_->geom_xmat + 9 * c;
+    mjtNum half = 0;
+    for (int i = 0; i < 3; ++i)
+    {
+      half += m->geom_size[3 * c + i] * std::abs(cx[i] * dir[0] + cx[3 + i] * dir[1] + cx[6 + i] * dir[2]);
+    }
+    int hit = -1;
+    const mjtNum dist = mj_ray(m, scratch_, scratch_->geom_xpos + 3 * c, dir, nullptr, 1, gripper_body_, &hit);
+    if (hit >= 0 && dist >= 0)
+    {
+      out[k].body = m->geom_bodyid[hit];
+      out[k].gap = dist - half;
+    }
+  }
+  return out;
+}
+
+bool MagnetGripperPlugin::is_plate(int b) const
+{
+  return std::find(plate_bodies_.begin(), plate_bodies_.end(), b) != plate_bodies_.end();
+}
+
+std::string MagnetGripperPlugin::cell_label(std::size_t k) const
+{
+  return "ch" + std::to_string(k) + "(" + cell_names_[k] + ")";
+}
+
+std::string MagnetGripperPlugin::channels_text() const
+{
+  std::string s;
+  for (std::size_t k = 0; k < enabled_.size(); ++k)
+  {
+    s += (k ? "," : "") + std::to_string(enabled_[k]);
+  }
+  return s;
+}
+
+std::string MagnetGripperPlugin::check_neighbours(const mjModel* m, const std::vector<CellHit>& hits, int own,
+                                                  bool log_all)
+{
+  std::string text;
+  for (std::size_t k = 0; k < hits.size(); ++k)
+  {
+    const auto& h = hits[k];
+    if (!enabled_[k] || h.body < 0 || h.body == own || !is_plate(h.body) || h.gap > warn_distance_)
+    {
+      continue;
+    }
+    const std::string plate = mj_id2name(m, mjOBJ_BODY, h.body);
+    char buf[160];
+    std::snprintf(buf, sizeof(buf), "%s>%s@%.1fmm", ("ch" + std::to_string(k)).c_str(),
+                  plate.substr(plate.rfind('/') + 1).c_str(), std::max(0.0, h.gap) * 1e3);
+    text += (text.empty() ? "" : ";") + std::string(buf);
+    if (log_all || warned_.insert({ static_cast<int>(k), h.body }).second)
+    {
+      warned_.insert({ static_cast<int>(k), h.body });
+      RCLCPP_WARN(logger_, "magnet: enabled cell %s is over another plate %s (%.1f mm) — it would pull that plate; "
+                           "turn this cell off",
+                  cell_label(k).c_str(), plate.c_str(), std::max(0.0, h.gap) * 1e3);
+    }
+  }
+  return text;
+}
+
+std::pair<bool, std::string> MagnetGripperPlugin::set_channels(const mjModel* m, const std::vector<int>& ch)
+{
+  const std::string before = channels_text();
+  enabled_.assign(ch.begin(), ch.end());
+  std::string msg = "channels " + before + " -> " + channels_text();
+  if (carried_ >= 0)
+  {
+    // Switching cells while holding: if no enabled cell is left on the carried plate it drops (magnet off).
+    const auto hits = cast_cells(m, phys_data_);
+    int on = 0;
+    on_plate_text_.clear();
+    for (std::size_t k = 0; k < hits.size(); ++k)
+    {
+      if (enabled_[k] && hits[k].body == carried_ && hits[k].gap <= attach_distance_ + 0.005)
+      {
+        ++on;
+        on_plate_text_ += (on_plate_text_.empty() ? "" : ",") + cell_label(k);
+      }
+    }
+    if (on == 0)
+    {
+      RCLCPP_ERROR(logger_, "magnet: %s leaves no enabled cell on %s — the plate drops", msg.c_str(),
+                   mj_id2name(m, mjOBJ_BODY, carried_));
+      msg += "; no cell left on the plate: " + release(m).second + " dropped";
+    }
+    else
+    {
+      warned_.clear();
+      warn_text_ = check_neighbours(m, hits, carried_, true);
+    }
+  }
+  RCLCPP_INFO(logger_, "magnet cells: %s", msg.c_str());
+  return { true, msg };
 }
 
 void MagnetGripperPlugin::cleanup()
