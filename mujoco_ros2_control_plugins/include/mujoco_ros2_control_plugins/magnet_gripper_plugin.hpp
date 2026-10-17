@@ -42,6 +42,9 @@ namespace mujoco_ros2_control_plugins
  *            control loops run separately, the wrench was computed from stale/torn data and the plate diverged.)
  * magnet_off (std_srvs/Trigger): the carried plate is released with gravity and full contacts (released_piece /
  *            released_sphere bits), so it settles by physics.
+ *            If the plate is released inside frozen_zone [xmin, xmax, ymin, ymax] (the inbound pallet — a plate put back
+ *            on the stack), it is frozen there like the rest of the static stack (gravcomp 1, contact bits frozen_bits)
+ *            instead: the static stack plates have no contacts, so a physical plate would fall through them.
  * state_topic (std_msgs/String): name of the carried plate, "" when empty.
  * Plate poses (ground truth) go to /tf at tf_rate: world -> <tf_prefix><plate name without plate_prefix>, the body
  * frame (bottom face at the CoG, +Z up through the plate). A vision node can later publish the same frames.
@@ -51,7 +54,8 @@ namespace mujoco_ros2_control_plugins
  *
  * Parameters (mujoco_plugins.<name>.):
  *   gripper_body, cell_geoms (names of the magnet cell collision geoms), plate_prefix, attach_distance [m],
- *   released_piece [contype, conaffinity], released_sphere [contype, conaffinity],
+ *   released_piece [contype, conaffinity], released_sphere [contype, conaffinity], frozen_zone [xmin,xmax,ymin,ymax]
+ *   (empty = off), frozen_bits [contype, conaffinity],
  *   on_service, off_service, state_topic (absolute names recommended)
  */
 class MagnetGripperPlugin : public MuJoCoROS2ControlPluginBase
@@ -82,6 +86,8 @@ private:
   double attach_distance_{ 0.01 };
   std::vector<int64_t> released_piece_{ 1, 15 };
   std::vector<int64_t> released_sphere_{ 8, 0 };
+  std::vector<double> frozen_zone_;
+  std::vector<int64_t> frozen_bits_{ 32, 0 };
 
   // carried plate (update() thread only)
   int carried_{ -1 };

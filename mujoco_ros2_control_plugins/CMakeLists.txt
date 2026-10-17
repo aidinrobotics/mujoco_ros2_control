@@ -36,6 +36,7 @@ add_library(mujoco_ros2_control_plugins SHARED
   src/external_wrench_plugin.cpp
   src/joint_command_plugin.cpp
   src/magnet_gripper_plugin.cpp
+  src/table_magnet_plugin.cpp
 )
 target_include_directories(mujoco_ros2_control_plugins PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

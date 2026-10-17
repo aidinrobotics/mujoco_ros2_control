@@ -35,4 +35,13 @@
       geoms by activating its gripper-plate weld; magnet_off releases it with gravity and contacts.
     </description>
   </class>
+  <class name="mujoco_ros2_control_plugins/TableMagnetPlugin"
+         type="mujoco_ros2_control_plugins::TableMagnetPlugin"
+         base_class_type="mujoco_ros2_control_plugins::MuJoCoROS2ControlPluginBase">
+    <description>
+      Table magnets (grinding table posts): magnet_on holds every plate lying on the posts (world weld "table/plate",
+      pulled flat once the gripper lets go), magnet_off releases them. Optional clear service parks them (sim stand-in
+      for unloading).
+    </description>
+  </class>
 </library>

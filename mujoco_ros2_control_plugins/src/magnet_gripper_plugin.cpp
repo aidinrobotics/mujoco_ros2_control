@@ -57,6 +57,13 @@ bool MagnetGripperPlugin::init(rclcpp::Node::SharedPtr node, const mjModel* m, m
   attach_distance_ = declare_or_get<double>(node_, "attach_distance", 0.01);
   released_piece_ = declare_or_get<std::vector<int64_t>>(node_, "released_piece", { 1, 15 });
   released_sphere_ = declare_or_get<std::vector<int64_t>>(node_, "released_sphere", { 8, 0 });
+  frozen_zone_ = declare_or_get<std::vector<double>>(node_, "frozen_zone", std::vector<double>{});
+  frozen_bits_ = declare_or_get<std::vector<int64_t>>(node_, "frozen_bits", { 32, 0 });
+  if (!frozen_zone_.empty() && frozen_zone_.size() != 4)
+  {
+    RCLCPP_ERROR(logger_, "MagnetGripperPlugin: frozen_zone needs [xmin, xmax, ymin, ymax].");
+    return false;
+  }
   const auto on_name = declare_or_get<std::string>(node_, "on_service", "magnet_on");
   const auto off_name = declare_or_get<std::string>(node_, "off_service", "magnet_off");
   const auto state_name = declare_or_get<std::string>(node_, "state_topic", "magnet_state");
@@ -269,11 +276,25 @@ std::pair<bool, std::string> MagnetGripperPlugin::release(const mjModel* m)
   const std::string name = mj_id2name(m, mjOBJ_BODY, carried_);
   phys_data_->eq_active[carried_eq_] = 0;
   carried_eq_ = -1;
-  const_cast<mjModel*>(m)->body_gravcomp[carried_] = 0.0;
-  set_plate_contacts(m, carried_, static_cast<int>(released_piece_.at(0)), static_cast<int>(released_piece_.at(1)),
-                     static_cast<int>(released_sphere_.at(0)), static_cast<int>(released_sphere_.at(1)));
+  const mjtNum* p = phys_data_->xpos + 3 * carried_;
+  const bool frozen = frozen_zone_.size() == 4 && p[0] >= frozen_zone_[0] && p[0] <= frozen_zone_[1] &&
+                      p[1] >= frozen_zone_[2] && p[1] <= frozen_zone_[3];
+  if (frozen)
+  {
+    // put back on the static inbound stack: stays where it is, like the other stack plates
+    const_cast<mjModel*>(m)->body_gravcomp[carried_] = 1.0;
+    const int fct = static_cast<int>(frozen_bits_.at(0)), fca = static_cast<int>(frozen_bits_.at(1));
+    set_plate_contacts(m, carried_, fct, fca, fct, fca);
+    mju_zero(phys_data_->qvel + m->jnt_dofadr[m->body_jntadr[carried_]], 6);
+  }
+  else
+  {
+    const_cast<mjModel*>(m)->body_gravcomp[carried_] = 0.0;
+    set_plate_contacts(m, carried_, static_cast<int>(released_piece_.at(0)), static_cast<int>(released_piece_.at(1)),
+                       static_cast<int>(released_sphere_.at(0)), static_cast<int>(released_sphere_.at(1)));
+  }
   carried_ = -1;
-  RCLCPP_INFO(logger_, "magnet OFF: released %s", name.c_str());
+  RCLCPP_INFO(logger_, "magnet OFF: released %s%s", name.c_str(), frozen ? " (frozen zone: kept static on the stack)" : "");
   return { true, name };
 }
 
