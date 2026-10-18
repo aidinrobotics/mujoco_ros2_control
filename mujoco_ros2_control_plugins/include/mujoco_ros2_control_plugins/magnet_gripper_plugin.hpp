@@ -47,6 +47,8 @@ namespace mujoco_ros2_control_plugins
  *            released_sphere bits), so it settles by physics.
  *            If the plate is released inside frozen_zone [xmin, xmax, ymin, ymax] (the inbound pallet — a plate put back
  *            on the stack), it is frozen there like the rest of the static stack (gravcomp 1, contact bits frozen_bits)
+ *            and, with frozen_weld_prefix (e.g. "table/" = the world welds build_rc_cell_mjcf.py adds), welded to the
+ *            world where it lies, so the next plate pressed on it (gripper spring) cannot push it away (2026-10-19)
  *            instead: the static stack plates have no contacts, so a physical plate would fall through them.
  * state_topic (std_msgs/String): name of the carried plate, "" when empty.
  * Plate poses (ground truth) go to /tf at tf_rate: world -> <tf_prefix><plate name without plate_prefix>, the body
@@ -126,6 +128,8 @@ private:
   std::vector<int64_t> released_sphere_{ 8, 0 };
   std::vector<double> frozen_zone_;
   std::vector<int64_t> frozen_bits_{ 32, 0 };
+  std::string frozen_weld_prefix_;      // "" = off; else a frozen plate is also welded to the world (eq <prefix><body>)
+  std::vector<int> frozen_welds_;       // equalities this plugin switched on (switched off again when picked up)
   std::vector<int64_t> carried_piece_{ 0, 0 };
   std::vector<int64_t> carried_sphere_{ 0, 0 };
   double carried_gravcomp_{ 1.0 };

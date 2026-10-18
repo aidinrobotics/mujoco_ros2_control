@@ -60,6 +60,7 @@ bool MagnetGripperPlugin::init(rclcpp::Node::SharedPtr node, const mjModel* m, m
   released_sphere_ = declare_or_get<std::vector<int64_t>>(node_, "released_sphere", { 8, 0 });
   frozen_zone_ = declare_or_get<std::vector<double>>(node_, "frozen_zone", std::vector<double>{});
   frozen_bits_ = declare_or_get<std::vector<int64_t>>(node_, "frozen_bits", { 32, 0 });
+  frozen_weld_prefix_ = declare_or_get<std::string>(node_, "frozen_weld_prefix", "");
   carried_piece_ = declare_or_get<std::vector<int64_t>>(node_, "carried_piece", { 0, 0 });
   carried_sphere_ = declare_or_get<std::vector<int64_t>>(node_, "carried_sphere", { 0, 0 });
   carried_gravcomp_ = declare_or_get<double>(node_, "carried_gravcomp", 1.0);
@@ -342,6 +343,15 @@ std::pair<bool, std::string> MagnetGripperPlugin::attach(const mjModel* m, mjDat
   carried_eq_ = eq;
   phys_data_->eq_active[eq] = 1;
   carried_ = best;
+  for (auto it = frozen_welds_.begin(); it != frozen_welds_.end(); ++it)   // picked up again: drop its world weld
+  {
+    if (m->eq_obj2id[*it] == best)
+    {
+      phys_data_->eq_active[*it] = 0;
+      frozen_welds_.erase(it);
+      break;
+    }
+  }
   const std::string name = mj_id2name(m, mjOBJ_BODY, best);
   // which enabled cells hold it, which are off the plate, which are over another plate
   on_plate_text_.clear();
@@ -392,6 +402,24 @@ std::pair<bool, std::string> MagnetGripperPlugin::release(const mjModel* m)
     const int fct = static_cast<int>(frozen_bits_.at(0)), fca = static_cast<int>(frozen_bits_.at(1));
     set_plate_contacts(m, carried_, fct, fca, fct, fca);
     mju_zero(phys_data_->qvel + m->jnt_dofadr[m->body_jntadr[carried_]], 6);
+    const int weq = frozen_weld_prefix_.empty() ? -1 :
+                    mj_name2id(m, mjOBJ_EQUALITY, (frozen_weld_prefix_ + name).c_str());
+    if (weq >= 0 && m->eq_type[weq] == mjEQ_WELD && m->eq_obj2id[weq] == carried_)
+    {
+      // weld to body1 (the world) at the pose it has now
+      auto* mm = const_cast<mjModel*>(m);
+      mjtNum* ed = mm->eq_data + mjNEQDATA * weq;
+      const int b1 = m->eq_obj1id[weq];
+      mjtNum dp[3], q1i[4];
+      mju_sub3(dp, phys_data_->xpos + 3 * carried_, phys_data_->xpos + 3 * b1);
+      mju_zero3(ed);
+      mju_mulMatTVec3(ed + 3, phys_data_->xmat + 9 * b1, dp);
+      mju_negQuat(q1i, phys_data_->xquat + 4 * b1);
+      mju_mulQuat(ed + 6, q1i, phys_data_->xquat + 4 * carried_);
+      ed[10] = 1.0;
+      phys_data_->eq_active[weq] = 1;
+      frozen_welds_.push_back(weq);
+    }
   }
   else
   {
