@@ -36,6 +36,7 @@ MujocoCameras::MujocoCameras(rclcpp::Node::SharedPtr node, std::recursive_mutex*
   , mj_data_(mujoco_data)
   , mj_model_(mujoco_model)
   , camera_publish_rate_(camera_publish_rate)
+  , on_demand_(camera_publish_rate <= 0.0)
 {
 }
 
@@ -143,6 +144,27 @@ void MujocoCameras::register_cameras(const hardware_interface::HardwareInfo& har
     // Add to list of cameras
     cameras_.push_back(camera);
   }
+
+  render_requested_.assign(cameras_.size(), 0);
+  if (on_demand_)
+  {
+    for (size_t i = 0; i < cameras_.size(); ++i)
+    {
+      const std::string srv = "/" + cameras_[i].name + "/render";
+      cameras_[i].render_srv = node_->create_service<std_srvs::srv::Trigger>(
+          srv, [this, i](const std::shared_ptr<std_srvs::srv::Trigger::Request>,
+                         std::shared_ptr<std_srvs::srv::Trigger::Response> res) {
+            {
+              std::lock_guard<std::mutex> l(render_mutex_);
+              render_requested_[i] = 1;
+            }
+            render_cv_.notify_all();
+            res->success = true;
+            res->message = "render queued";
+          });
+      RCLCPP_INFO(node_->get_logger(), "    on-demand: '%s' renders one frame", srv.c_str());
+    }
+  }
 }
 
 void MujocoCameras::init()
@@ -161,6 +183,7 @@ void MujocoCameras::init()
 void MujocoCameras::close()
 {
   publish_images_ = false;
+  render_cv_.notify_all();
   if (rendering_thread_.joinable())
   {
     rendering_thread_.join();
@@ -190,7 +213,14 @@ void MujocoCameras::update_loop()
 
   // Initialize data for camera rendering
   mj_camera_data_ = mj_makeData(mj_model_);
-  RCLCPP_INFO(node_->get_logger(), "Starting the camera rendering loop, publishing at %f Hz", camera_publish_rate_);
+  if (on_demand_)
+  {
+    RCLCPP_INFO(node_->get_logger(), "Starting the camera rendering loop, on demand (/<camera>/render)");
+  }
+  else
+  {
+    RCLCPP_INFO(node_->get_logger(), "Starting the camera rendering loop, publishing at %f Hz", camera_publish_rate_);
+  }
 
   // create scene and context
   mjv_makeScene(mj_model_, &mjv_scn_, 2000);
@@ -206,12 +236,35 @@ void MujocoCameras::update_loop()
   mjr_resizeOffscreen(max_width, max_height, &mjr_con_);
   RCLCPP_INFO(node_->get_logger(), "Resized offscreen buffer to %d x %d", max_width, max_height);
 
-  // TODO: Support per-camera publish rates?
-  rclcpp::Rate rate(camera_publish_rate_);
-  while (rclcpp::ok() && publish_images_)
+  if (on_demand_)
   {
-    update();
-    rate.sleep();
+    std::vector<char> which;
+    while (rclcpp::ok() && publish_images_)
+    {
+      {
+        std::unique_lock<std::mutex> l(render_mutex_);
+        render_cv_.wait_for(l, 100ms, [this] {
+          return !publish_images_ ||
+                 std::any_of(render_requested_.begin(), render_requested_.end(), [](char c) { return c != 0; });
+        });
+        which = render_requested_;
+        std::fill(render_requested_.begin(), render_requested_.end(), 0);
+      }
+      if (std::any_of(which.begin(), which.end(), [](char c) { return c != 0; }))
+      {
+        update(which);
+      }
+    }
+  }
+  else
+  {
+    // TODO: Support per-camera publish rates?
+    rclcpp::Rate rate(camera_publish_rate_);
+    while (rclcpp::ok() && publish_images_)
+    {
+      update();
+      rate.sleep();
+    }
   }
 
   mjv_freeScene(&mjv_scn_);
@@ -221,6 +274,11 @@ void MujocoCameras::update_loop()
 }
 
 void MujocoCameras::update()
+{
+  update(std::vector<char>(cameras_.size(), 1));
+}
+
+void MujocoCameras::update(const std::vector<char>& which)
 {
   // Rendering is done offscreen
   mjr_setBuffer(mjFB_OFFSCREEN, &mjr_con_);
@@ -232,8 +290,13 @@ void MujocoCameras::update()
   }
 
   // Step 2: Render the scene and copy images to relevant camera data containers.
-  for (auto& camera : cameras_)
+  for (size_t ci = 0; ci < cameras_.size(); ++ci)
   {
+    if (!which[ci])
+    {
+      continue;
+    }
+    auto& camera = cameras_[ci];
     // Render scene
     mjv_updateScene(mj_model_, mj_camera_data_, &mjv_opt_, NULL, &camera.mjv_cam, mjCAT_ALL, &mjv_scn_);
     mjr_render(camera.viewport, &mjv_scn_, &mjr_con_);
@@ -246,8 +309,13 @@ void MujocoCameras::update()
   const float near = static_cast<float>(mj_model_->vis.map.znear * mj_model_->stat.extent);
   const float far = static_cast<float>(mj_model_->vis.map.zfar * mj_model_->stat.extent);
   const float depth_scale = 1.0f - near / far;
-  for (auto& camera : cameras_)
+  for (size_t ci = 0; ci < cameras_.size(); ++ci)
   {
+    if (!which[ci])
+    {
+      continue;
+    }
+    auto& camera = cameras_[ci];
     // Fix non-linear projections in the depth image and flip the data.
     // https://github.com/google-deepmind/mujoco/blob/3.4.0/python/mujoco/renderer.py#L190
     const bool noisy = depth_noise_mm_at_3m_ > 0.0 && !noise_table_.empty();
@@ -283,8 +351,13 @@ void MujocoCameras::update()
   }
 
   // Step 4: Publish the images.
-  for (auto& camera : cameras_)
+  for (size_t ci = 0; ci < cameras_.size(); ++ci)
   {
+    if (!which[ci])
+    {
+      continue;
+    }
+    auto& camera = cameras_[ci];
     // Publish images and camera info
     const auto time = node_->now();
     camera.image.header.stamp = time;

@@ -14,6 +14,7 @@ find_package(control_toolbox REQUIRED)
 find_package(hardware_interface REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(std_srvs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(tf2_msgs REQUIRED)
 find_package(pluginlib REQUIRED)
@@ -175,6 +176,7 @@ PUBLIC
   rclcpp_lifecycle::rclcpp_lifecycle
   ${nav_msgs_TARGETS}
   ${sensor_msgs_TARGETS}
+  ${std_srvs_TARGETS}
   ${geometry_msgs_TARGETS}
   ${tf2_msgs_TARGETS}
   ${mujoco_ros2_control_msgs_TARGETS}
@@ -267,6 +269,7 @@ ament_export_dependencies(
   rclcpp_lifecycle
   nav_msgs
   sensor_msgs
+  std_srvs
   mujoco_ros2_control_msgs
   mujoco_ros2_control_plugins
   pluginlib

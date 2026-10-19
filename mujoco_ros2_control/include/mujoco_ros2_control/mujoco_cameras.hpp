@@ -20,6 +20,7 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
 #include <mutex>
 #include <random>
 #include <thread>
@@ -34,6 +35,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/camera_info.hpp>
 #include <sensor_msgs/msg/image.hpp>
+#include <std_srvs/srv/trigger.hpp>
 
 namespace mujoco_ros2_control
 {
@@ -63,6 +65,8 @@ struct CameraData
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr image_pub;
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr depth_image_pub;
   rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr camera_info_pub;
+  // On-demand mode (camera_publish_rate <= 0): std_srvs/Trigger "/<name>/render" asks for one frame.
+  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr render_srv;
 };
 
 /**
@@ -118,6 +122,11 @@ private:
    */
   void update();
 
+  /**
+   * @brief Renders and publishes only the cameras whose flag is set (on-demand mode).
+   */
+  void update(const std::vector<char>& which);
+
   rclcpp::Node::SharedPtr node_;
 
   // Ensures locked access to simulation data for rendering.
@@ -147,6 +156,14 @@ private:
   // Camera processing thread
   std::thread rendering_thread_;
   std::atomic_bool publish_images_;
+
+  // On-demand rendering (camera_publish_rate <= 0): nothing is rendered until a "/<name>/render" request
+  // (a real structured-light camera is triggered, not streamed; rendering four 2048x1536 cameras
+  // continuously costs sim CPU for nothing).
+  bool on_demand_{ false };
+  std::mutex render_mutex_;
+  std::condition_variable render_cv_;
+  std::vector<char> render_requested_;
 };
 
 }  // namespace mujoco_ros2_control
