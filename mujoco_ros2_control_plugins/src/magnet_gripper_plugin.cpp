@@ -520,7 +520,7 @@ void MagnetGripperPlugin::update(const mjModel* m, mjData* d)
 std::vector<MagnetGripperPlugin::CellHit> MagnetGripperPlugin::cast_cells(const mjModel* m, const mjData* d)
 {
   // Measure on a private mjData: mj_ray / mj_kinematics must not touch the physics data's state or arena.
-  mju_copy(scratch_->qpos, d->qpos, m->nq);
+  mju_copy(scratch_->qpos, d->qpos, static_cast<int>(m->nq));
   mj_kinematics(m, scratch_);
   const mjtNum* gx = scratch_->xmat + 9 * gripper_body_;
   const mjtNum dir[3] = { gx[0], gx[3], gx[6] };
@@ -536,7 +536,7 @@ std::vector<MagnetGripperPlugin::CellHit> MagnetGripperPlugin::cast_cells(const 
       half += m->geom_size[3 * c + i] * std::abs(cx[i] * dir[0] + cx[3 + i] * dir[1] + cx[6 + i] * dir[2]);
     }
     int hit = -1;
-    const mjtNum dist = mj_ray(m, scratch_, scratch_->geom_xpos + 3 * c, dir, nullptr, 1, gripper_body_, &hit);
+    const mjtNum dist = mj_ray(m, scratch_, scratch_->geom_xpos + 3 * c, dir, nullptr, 1, gripper_body_, &hit, nullptr);
     if (hit >= 0 && dist >= 0)
     {
       out[k].body = m->geom_bodyid[hit];

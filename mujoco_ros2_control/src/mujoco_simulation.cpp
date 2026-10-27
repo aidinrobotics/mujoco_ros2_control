@@ -1000,7 +1000,7 @@ void MujocoSimulation::physics_loop()
         // and xfrc_viewer_capture_ remains valid.  If it differs, the render thread ran: it
         // zeroed xfrc_applied and called mjv_applyPerturbForce, so mj_data_->xfrc_applied now
         // holds only drag forces — use that as the new viewer capture.
-        const int nbody6 = 6 * mj_model_->nbody;
+        const int nbody6 = 6 * static_cast<int>(mj_model_->nbody);
         if (std::memcmp(mj_data_->xfrc_applied, xfrc_last_restore_.data(), nbody6 * sizeof(mjtNum)) != 0)
         {
           // Render thread ran: xfrc_applied was zeroed then drag was applied.

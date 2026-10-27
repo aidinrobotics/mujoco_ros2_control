@@ -199,7 +199,7 @@ std::string TableMagnetPlugin::held_names(const mjModel* m) const
 
 std::pair<bool, std::string> TableMagnetPlugin::hold(const mjModel* m, mjData* d)
 {
-  mju_copy(scratch_->qpos, d->qpos, m->nq);
+  mju_copy(scratch_->qpos, d->qpos, static_cast<int>(m->nq));
   mj_kinematics(m, scratch_);
   std::vector<mjtNum> top_z(plate_bodies_.size(), -std::numeric_limits<mjtNum>::infinity());
   std::vector<mjtNum> gap(plate_bodies_.size(), std::numeric_limits<mjtNum>::infinity());
@@ -218,7 +218,7 @@ std::pair<bool, std::string> TableMagnetPlugin::hold(const mjModel* m, mjData* d
         origin[i] = P[i] + 0.001 * Z[i] + o[0] * X[i] + o[1] * Y[i];
       }
       int hit = -1;
-      const mjtNum dist = mj_ray(m, scratch_, origin, Z, nullptr, 1, post_parent_[k], &hit);
+      const mjtNum dist = mj_ray(m, scratch_, origin, Z, nullptr, 1, post_parent_[k], &hit, nullptr);
       if (hit < 0 || dist < 0 || dist > attach_distance_)
       {
         continue;
