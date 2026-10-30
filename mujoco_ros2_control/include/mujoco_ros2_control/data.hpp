@@ -212,6 +212,11 @@ struct FTSensorData
   std::string name;
   SensorData<Eigen::Vector3d> force;
   SensorData<Eigen::Vector3d> torque;
+  // [fx fy fz tx ty tz] after noise: low-pass state and the delay ring buffer
+  Eigen::Matrix<double, 6, 1> filtered{ Eigen::Matrix<double, 6, 1>::Zero() };
+  bool filter_ready{ false };
+  std::vector<Eigen::Matrix<double, 6, 1>> delay_buffer{};
+  std::size_t delay_idx{ 0 };
 };
 
 struct IMUSensorData

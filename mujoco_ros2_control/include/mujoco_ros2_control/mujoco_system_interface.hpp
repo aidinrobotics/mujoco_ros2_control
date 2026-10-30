@@ -346,6 +346,12 @@ private:
   double command_delay_ms_{ 0.0 };
   bool command_delay_buffers_ready_{ false };
 
+  // F/T signal path after the noise: first-order low-pass (Hz, 0 = off) and a constant delay (ms, 0 = off).
+  // The delay buffers are sized on the first read() when the control period is known.
+  double ft_lowpass_hz_{ 0.0 };
+  double ft_delay_ms_{ 0.0 };
+  bool ft_delay_buffers_ready_{ false };
+
   bool override_mujoco_actuator_positions_{ false };
   bool override_urdf_joint_positions_{ false };
 
