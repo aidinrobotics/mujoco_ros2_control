@@ -61,6 +61,7 @@ bool MagnetGripperPlugin::init(rclcpp::Node::SharedPtr node, const mjModel* m, m
   frozen_zone_ = declare_or_get<std::vector<double>>(node_, "frozen_zone", std::vector<double>{});
   frozen_bits_ = declare_or_get<std::vector<int64_t>>(node_, "frozen_bits", { 32, 0 });
   frozen_weld_prefix_ = declare_or_get<std::string>(node_, "frozen_weld_prefix", "");
+  flush_max_deg_ = declare_or_get<double>(node_, "flush_max_deg", 1.0);
   carried_piece_ = declare_or_get<std::vector<int64_t>>(node_, "carried_piece", { 0, 0 });
   carried_sphere_ = declare_or_get<std::vector<int64_t>>(node_, "carried_sphere", { 0, 0 });
   carried_gravcomp_ = declare_or_get<double>(node_, "carried_gravcomp", 1.0);
@@ -334,6 +335,32 @@ std::pair<bool, std::string> MagnetGripperPlugin::attach(const mjModel* m, mjDat
   mju_copy4(q2, d->xquat + 4 * best);
   mju_negQuat(q1i, q1);
   mju_mulQuat(ed + 6, q1i, q2);
+  // The magnets pull the plate flat against the face: a small tilt between plate and face (plate resting slightly
+  // tilted on the grinding-table posts, 0.15 deg in the RC cell) is not kept — otherwise the plate is carried and put
+  // down with it and, frozen on the outbound stack, stays tilted (RC cell 2026-11-07: 0.2 deg on a flat deck). Only up to
+  // flush_max_deg; a larger tilt is kept as it is (the plate would not be pulled flat).
+  {
+    mjtNum ez[3] = { 0, 0, 1 }, zp[3], R[9];
+    mju_quat2Mat(R, ed + 6);
+    mju_mulMatVec3(zp, R, ez);                       // plate +Z in the gripper frame
+    int k = 0;
+    for (int i = 1; i < 3; ++i)
+      if (std::abs(zp[i]) > std::abs(zp[k]))
+        k = i;
+    mjtNum n[3] = { 0, 0, 0 };
+    n[k] = zp[k] > 0 ? 1.0 : -1.0;                    // nearest gripper axis = the face normal
+    const mjtNum c = std::min<mjtNum>(1.0, std::max<mjtNum>(-1.0, mju_dot3(zp, n)));
+    const mjtNum ang = std::acos(c);
+    if (ang > 1e-9 && ang <= flush_max_deg_ * M_PI / 180.0)
+    {
+      mjtNum ax[3], qf[4], qn[4];
+      mju_cross(ax, zp, n);
+      mju_normalize3(ax);
+      mju_axisAngle2Quat(qf, ax, ang);               // gripper frame: zp -> n
+      mju_mulQuat(qn, qf, ed + 6);
+      mju_copy4(ed + 6, qn);
+    }
+  }
   ed[10] = 1.0;
 
   // While carried: carried_gravcomp (1 = weightless) and carried_* contact bits (default none).

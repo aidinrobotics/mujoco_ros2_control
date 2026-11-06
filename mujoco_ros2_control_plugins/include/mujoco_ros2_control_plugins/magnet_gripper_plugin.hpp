@@ -127,6 +127,7 @@ private:
   std::vector<int64_t> released_piece_{ 1, 15 };
   std::vector<int64_t> released_sphere_{ 8, 0 };
   std::vector<double> frozen_zone_;
+  double flush_max_deg_{ 1.0 };   // attach: plate tilt vs the face up to this is pulled flush (real magnets)
   std::vector<int64_t> frozen_bits_{ 32, 0 };
   std::string frozen_weld_prefix_;      // "" = off; else a frozen plate is also welded to the world (eq <prefix><body>)
   std::vector<int> frozen_welds_;       // equalities this plugin switched on (switched off again when picked up)
