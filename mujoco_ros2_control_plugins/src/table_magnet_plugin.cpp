@@ -206,7 +206,9 @@ std::pair<bool, std::string> TableMagnetPlugin::hold(const mjModel* m, mjData* d
   for (std::size_t k = 0; k < post_bodies_.size(); ++k)
   {
     const mjtNum* P = scratch_->xpos + 3 * post_bodies_[k];
-    const mjtNum* R = scratch_->xmat + 9 * post_bodies_[k];
+    // Ray direction = the parent "<table>_magnets" body z (up). The post frames themselves may point elsewhere
+    // (RC cell 2026-11-03: magnet_N frames turned to the tool pose, z down, for the real 220).
+    const mjtNum* R = scratch_->xmat + 9 * post_parent_[k];
     const mjtNum X[3] = { R[0], R[3], R[6] }, Y[3] = { R[1], R[4], R[7] }, Z[3] = { R[2], R[5], R[8] };
     const mjtNum r = 0.7 * post_radius_;
     const mjtNum off[5][2] = { { 0, 0 }, { r, 0 }, { -r, 0 }, { 0, r }, { 0, -r } };
