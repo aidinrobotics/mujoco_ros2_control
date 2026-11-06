@@ -38,6 +38,7 @@ T declare_or_get(const rclcpp::Node::SharedPtr& node, const std::string& name, c
   return node->get_parameter(full).get_value<T>();
 }
 
+std::atomic<int> g_parked_in{ 0 };  // inbound plates parked by park_service
 std::atomic<int> g_parked{ 0 };  // plates parked by clear_service (all tables) — next park slot
 
 // roll/pitch removed: the rotation that takes the body +Z onto world +Z, applied in front of q
@@ -76,6 +77,7 @@ bool TableMagnetPlugin::init(rclcpp::Node::SharedPtr node, const mjModel* m, mjD
   const auto posts = declare_or_get<std::vector<std::string>>(node_, "post_bodies", {});
   post_radius_ = declare_or_get<double>(node_, "post_radius", 0.05);
   const auto prefix = declare_or_get<std::string>(node_, "plate_prefix", "inbound/");
+  plate_prefix_ = prefix;
   attach_distance_ = declare_or_get<double>(node_, "attach_distance", 0.03);
   settle_ = declare_or_get<bool>(node_, "settle", true);
   settle_clearance_ = declare_or_get<double>(node_, "settle_clearance", 0.0005);
@@ -83,6 +85,8 @@ bool TableMagnetPlugin::init(rclcpp::Node::SharedPtr node, const mjModel* m, mjD
   const auto on_name = declare_or_get<std::string>(node_, "on_service", "magnet_on");
   const auto off_name = declare_or_get<std::string>(node_, "off_service", "magnet_off");
   const auto clear_name = declare_or_get<std::string>(node_, "clear_service", "");
+  const auto park_name = declare_or_get<std::string>(node_, "park_service", "");
+  park_inbound_position_ = declare_or_get<std::vector<double>>(node_, "park_inbound_position", park_inbound_position_);
   const auto state_name = declare_or_get<std::string>(node_, "state_topic", "magnet_state");
   park_position_ = declare_or_get<std::vector<double>>(node_, "park_position", park_position_);
   park_step_ = declare_or_get<std::vector<double>>(node_, "park_step", park_step_);
@@ -141,6 +145,19 @@ bool TableMagnetPlugin::init(rclcpp::Node::SharedPtr node, const mjModel* m, mjD
   {
     clear_srv_ = node_->create_service<Trigger>(clear_name, bind(Cmd::Clear));
   }
+  if (!park_name.empty())
+  {
+    using SetParameters = rcl_interfaces::srv::SetParameters;
+    park_srv_ = node_->create_service<SetParameters>(
+        park_name, [this](const std::shared_ptr<SetParameters::Request> q, std::shared_ptr<SetParameters::Response> r) {
+          for (const auto& p : q->parameters)
+          {
+            rcl_interfaces::msg::SetParametersResult one;
+            std::tie(one.successful, one.reason) = call(Cmd::Park, p.name);
+            r->results.push_back(one);
+          }
+        });
+  }
   state_pub_ = node_->create_publisher<std_msgs::msg::String>(state_name, rclcpp::QoS(1).transient_local());
   scratch_ = mj_makeData(m);
   RCLCPP_INFO(logger_, "TableMagnetPlugin: %zu posts, %zu plates ('%s*'), attach %.0f mm, settle %s. on=%s off=%s%s%s",
@@ -150,7 +167,7 @@ bool TableMagnetPlugin::init(rclcpp::Node::SharedPtr node, const mjModel* m, mjD
   return true;
 }
 
-std::pair<bool, std::string> TableMagnetPlugin::call(Cmd cmd)
+std::pair<bool, std::string> TableMagnetPlugin::call(Cmd cmd, const std::string& name)
 {
   std::future<std::pair<bool, std::string>> fut;
   {
@@ -159,7 +176,7 @@ std::pair<bool, std::string> TableMagnetPlugin::call(Cmd cmd)
     {
       return { false, "previous table magnet request still pending" };
     }
-    pending_.emplace(Request{ cmd, {} });
+    pending_.emplace(Request{ cmd, name, {} });
     fut = pending_->result.get_future();
   }
   if (fut.wait_for(std::chrono::seconds(5)) != std::future_status::ready)
@@ -337,6 +354,46 @@ std::pair<bool, std::string> TableMagnetPlugin::clear(const mjModel* m, mjData* 
   return { true, "parked " + names };
 }
 
+std::pair<bool, std::string> TableMagnetPlugin::park(const mjModel* m, mjData* d, const std::string& name)
+{
+  const int b = mj_name2id(m, mjOBJ_BODY, (plate_prefix_ + name).c_str());
+  const auto it = std::find(plate_bodies_.begin(), plate_bodies_.end(), b);
+  if (b < 0 || it == plate_bodies_.end())
+  {
+    return { false, "no plate " + plate_prefix_ + name };
+  }
+  const auto idx = static_cast<int>(it - plate_bodies_.begin());
+  if (phys_data_->eq_active[table_eq_[idx]] || (gripper_eq_[idx] >= 0 && phys_data_->eq_active[gripper_eq_[idx]]))
+  {
+    return { false, name + " is held (table or gripper) — not parked" };
+  }
+  auto* mm = const_cast<mjModel*>(m);
+  const int k = g_parked_in++;
+  const int qa = m->jnt_qposadr[m->body_jntadr[b]];
+  const int va = m->jnt_dofadr[m->body_jntadr[b]];
+  mjtNum q[4];
+  level_quat(d->xmat + 9 * b, d->xquat + 4 * b, q);
+  for (int i = 0; i < 3; ++i)
+  {
+    d->qpos[qa + i] = park_inbound_position_[i] + k * park_step_[i];
+  }
+  mju_copy4(d->qpos + qa + 3, q);
+  mju_zero(d->qvel + va, 6);
+  mm->body_gravcomp[b] = 1.0;
+  for (int g = 0; g < m->ngeom; ++g)
+  {
+    if (m->geom_bodyid[g] == b && m->geom_group[g] != 1)
+    {
+      mm->geom_contype[g] = 32;
+      mm->geom_conaffinity[g] = 0;
+    }
+  }
+  mm->body_contype[b] = 32;
+  mm->body_conaffinity[b] = 0;
+  RCLCPP_INFO(logger_, "inbound park (test): %s off the pallet", name.c_str());
+  return { true, "parked " + name };
+}
+
 void TableMagnetPlugin::update(const mjModel* m, mjData* d)
 {
   {
@@ -361,6 +418,9 @@ void TableMagnetPlugin::update(const mjModel* m, mjData* d)
           break;
         case Cmd::Clear:
           r = clear(m, pd);
+          break;
+        case Cmd::Park:
+          r = park(m, pd, pending_->name);
           break;
       }
       pending_->result.set_value(r);

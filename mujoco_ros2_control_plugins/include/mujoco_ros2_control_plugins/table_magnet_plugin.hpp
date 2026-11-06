@@ -23,6 +23,7 @@
 
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/string.hpp>
+#include <rcl_interfaces/srv/set_parameters.hpp>
 #include <std_srvs/srv/trigger.hpp>
 
 #include "mujoco_ros2_control_plugins/mujoco_ros2_control_plugins_base.hpp"
@@ -52,6 +53,10 @@ namespace mujoco_ros2_control_plugins
  *   post_bodies (frames at the post tops, +Z up), post_radius [m], plate_prefix, attach_distance [m], settle,
  *   settle_clearance [m], gripper_weld_prefix, on_service, off_service, state_topic, clear_service,
  *   park_position [x,y,z], park_step [x,y,z]
+ * park_service (rcl_interfaces/SetParameters, optional, test stand-in): each parameter name = a plate (without prefix)
+ *            → that plate is moved to park_inbound_position + k * park_step and frozen there (gravcomp 1, no contacts)
+ *            — RC cell 2026-11-07: a plate the pick check could not grip is taken off the inbound pallet so the test
+ *            goes on with the next plate. Param park_inbound_position [x,y,z].
  */
 class TableMagnetPlugin : public MuJoCoROS2ControlPluginBase
 {
@@ -65,11 +70,13 @@ private:
   {
     On,
     Off,
-    Clear
+    Clear,
+    Park
   };
   struct Request
   {
     Cmd cmd;
+    std::string name;
     std::promise<std::pair<bool, std::string>> result;
   };
   struct Held
@@ -83,7 +90,8 @@ private:
   std::pair<bool, std::string> release_all(const mjModel* m, mjData* d);
   std::pair<bool, std::string> clear(const mjModel* m, mjData* d);
   void write_weld(const mjModel* m, int eq, const mjtNum* pos, const mjtNum* quat);
-  std::pair<bool, std::string> call(Cmd cmd);
+  std::pair<bool, std::string> park(const mjModel* m, mjData* d, const std::string& name);
+  std::pair<bool, std::string> call(Cmd cmd, const std::string& name = "");
   std::string held_names(const mjModel* m) const;
 
   rclcpp::Node::SharedPtr node_;
@@ -100,6 +108,8 @@ private:
   std::vector<int> gripper_eq_;  // weld "<gripper_weld_prefix><plate>" per plate (-1 = none)
   std::vector<double> park_position_{ 0.83, -1.75, 0.25 };
   std::vector<double> park_step_{ 0.0, 0.0, 0.03 };
+  std::vector<double> park_inbound_position_{ -3.5, -3.5, 0.0 };
+  std::string plate_prefix_;
 
   std::vector<Held> held_;  // update() thread only
   mjData* phys_data_{ nullptr };
@@ -111,6 +121,7 @@ private:
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr on_srv_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr off_srv_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr clear_srv_;
+  rclcpp::Service<rcl_interfaces::srv::SetParameters>::SharedPtr park_srv_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr state_pub_;
   double last_state_pub_{ -1.0 };
 };
