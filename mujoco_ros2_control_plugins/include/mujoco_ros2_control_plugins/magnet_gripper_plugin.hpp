@@ -131,6 +131,19 @@ private:
   std::vector<int64_t> frozen_bits_{ 32, 0 };
   std::string frozen_weld_prefix_;      // "" = off; else a frozen plate is also welded to the world (eq <prefix><body>)
   std::vector<int> frozen_welds_;       // equalities this plugin switched on (switched off again when picked up)
+  // settle_freeze (2026-11-08): a plate released OUTSIDE frozen_zone is physics until it has settled (all of its
+  // free-joint speeds under settle_speed / settle_spin for settle_hold s), then frozen like the frozen zone (gravcomp,
+  // frozen_bits, world weld at the settled pose). A stack of 15 awake plates ran at 0.03-0.09 x real time.
+  bool settle_freeze_{ false };
+  std::vector<double> settle_zone_;     // [xmin, xmax, ymin, ymax] world; only plates released inside are frozen
+  double settle_speed_{ 0.002 };        // [m/s]
+  double settle_spin_{ 0.02 };          // [rad/s]
+  double settle_hold_{ 0.3 };           // [s sim]
+  double settle_min_{ 0.5 };            // [s sim] after the release
+  struct Settling { int body; double t_release; double t_still; };
+  std::vector<Settling> settling_;
+  double last_settle_check_{ -1.0 };
+  void freeze_plate(const mjModel* m, mjData* pd, int body);
   std::vector<int64_t> carried_piece_{ 0, 0 };
   std::vector<int64_t> carried_sphere_{ 0, 0 };
   double carried_gravcomp_{ 1.0 };

@@ -61,6 +61,17 @@ bool MagnetGripperPlugin::init(rclcpp::Node::SharedPtr node, const mjModel* m, m
   frozen_zone_ = declare_or_get<std::vector<double>>(node_, "frozen_zone", std::vector<double>{});
   frozen_bits_ = declare_or_get<std::vector<int64_t>>(node_, "frozen_bits", { 32, 0 });
   frozen_weld_prefix_ = declare_or_get<std::string>(node_, "frozen_weld_prefix", "");
+  settle_freeze_ = declare_or_get<bool>(node_, "settle_freeze", false);
+  settle_zone_ = declare_or_get<std::vector<double>>(node_, "settle_zone", std::vector<double>{});
+  if (settle_freeze_ && settle_zone_.size() != 4)
+  {
+    RCLCPP_ERROR(logger_, "MagnetGripperPlugin: settle_freeze needs settle_zone [xmin, xmax, ymin, ymax] -> off.");
+    settle_freeze_ = false;
+  }
+  settle_speed_ = declare_or_get<double>(node_, "settle_speed", 0.002);
+  settle_spin_ = declare_or_get<double>(node_, "settle_spin", 0.02);
+  settle_hold_ = declare_or_get<double>(node_, "settle_hold", 0.3);
+  settle_min_ = declare_or_get<double>(node_, "settle_min", 0.5);
   flush_max_deg_ = declare_or_get<double>(node_, "flush_max_deg", 1.0);
   carried_piece_ = declare_or_get<std::vector<int64_t>>(node_, "carried_piece", { 0, 0 });
   carried_sphere_ = declare_or_get<std::vector<int64_t>>(node_, "carried_sphere", { 0, 0 });
@@ -370,6 +381,8 @@ std::pair<bool, std::string> MagnetGripperPlugin::attach(const mjModel* m, mjDat
   carried_eq_ = eq;
   phys_data_->eq_active[eq] = 1;
   carried_ = best;
+  settling_.erase(std::remove_if(settling_.begin(), settling_.end(), [best](const Settling& x) { return x.body == best; }),
+                  settling_.end());
   for (auto it = frozen_welds_.begin(); it != frozen_welds_.end(); ++it)   // picked up again: drop its world weld
   {
     if (m->eq_obj2id[*it] == best)
@@ -410,6 +423,32 @@ std::pair<bool, std::string> MagnetGripperPlugin::attach(const mjModel* m, mjDat
   return { true, name };
 }
 
+void MagnetGripperPlugin::freeze_plate(const mjModel* m, mjData* pd, int body)
+{
+  const std::string name = mj_id2name(m, mjOBJ_BODY, body);
+  const_cast<mjModel*>(m)->body_gravcomp[body] = 1.0;
+  const int fct = static_cast<int>(frozen_bits_.at(0)), fca = static_cast<int>(frozen_bits_.at(1));
+  set_plate_contacts(m, body, fct, fca, fct, fca);
+  mju_zero(pd->qvel + m->jnt_dofadr[m->body_jntadr[body]], 6);
+  const int weq = frozen_weld_prefix_.empty() ? -1 : mj_name2id(m, mjOBJ_EQUALITY, (frozen_weld_prefix_ + name).c_str());
+  if (weq >= 0 && m->eq_type[weq] == mjEQ_WELD && m->eq_obj2id[weq] == body)
+  {
+    // weld to body1 (the world) at the pose it has now
+    auto* mm = const_cast<mjModel*>(m);
+    mjtNum* ed = mm->eq_data + mjNEQDATA * weq;
+    const int b1 = m->eq_obj1id[weq];
+    mjtNum dp[3], q1i[4];
+    mju_sub3(dp, pd->xpos + 3 * body, pd->xpos + 3 * b1);
+    mju_zero3(ed);
+    mju_mulMatTVec3(ed + 3, pd->xmat + 9 * b1, dp);
+    mju_negQuat(q1i, pd->xquat + 4 * b1);
+    mju_mulQuat(ed + 6, q1i, pd->xquat + 4 * body);
+    ed[10] = 1.0;
+    pd->eq_active[weq] = 1;
+    frozen_welds_.push_back(weq);
+  }
+}
+
 std::pair<bool, std::string> MagnetGripperPlugin::release(const mjModel* m)
 {
   if (carried_ < 0)
@@ -425,34 +464,18 @@ std::pair<bool, std::string> MagnetGripperPlugin::release(const mjModel* m)
   if (frozen)
   {
     // put back on the static inbound stack: stays where it is, like the other stack plates
-    const_cast<mjModel*>(m)->body_gravcomp[carried_] = 1.0;
-    const int fct = static_cast<int>(frozen_bits_.at(0)), fca = static_cast<int>(frozen_bits_.at(1));
-    set_plate_contacts(m, carried_, fct, fca, fct, fca);
-    mju_zero(phys_data_->qvel + m->jnt_dofadr[m->body_jntadr[carried_]], 6);
-    const int weq = frozen_weld_prefix_.empty() ? -1 :
-                    mj_name2id(m, mjOBJ_EQUALITY, (frozen_weld_prefix_ + name).c_str());
-    if (weq >= 0 && m->eq_type[weq] == mjEQ_WELD && m->eq_obj2id[weq] == carried_)
-    {
-      // weld to body1 (the world) at the pose it has now
-      auto* mm = const_cast<mjModel*>(m);
-      mjtNum* ed = mm->eq_data + mjNEQDATA * weq;
-      const int b1 = m->eq_obj1id[weq];
-      mjtNum dp[3], q1i[4];
-      mju_sub3(dp, phys_data_->xpos + 3 * carried_, phys_data_->xpos + 3 * b1);
-      mju_zero3(ed);
-      mju_mulMatTVec3(ed + 3, phys_data_->xmat + 9 * b1, dp);
-      mju_negQuat(q1i, phys_data_->xquat + 4 * b1);
-      mju_mulQuat(ed + 6, q1i, phys_data_->xquat + 4 * carried_);
-      ed[10] = 1.0;
-      phys_data_->eq_active[weq] = 1;
-      frozen_welds_.push_back(weq);
-    }
+    freeze_plate(m, phys_data_, carried_);
   }
   else
   {
     const_cast<mjModel*>(m)->body_gravcomp[carried_] = 0.0;
     set_plate_contacts(m, carried_, static_cast<int>(released_piece_.at(0)), static_cast<int>(released_piece_.at(1)),
                        static_cast<int>(released_sphere_.at(0)), static_cast<int>(released_sphere_.at(1)));
+    if (settle_freeze_ && p[0] >= settle_zone_[0] && p[0] <= settle_zone_[1] && p[1] >= settle_zone_[2] &&
+        p[1] <= settle_zone_[3])
+    {
+      settling_.push_back({ carried_, phys_data_->time, -1.0 });
+    }
   }
   carried_ = -1;
   on_plate_text_.clear();
@@ -494,6 +517,43 @@ void MagnetGripperPlugin::update(const mjModel* m, mjData* d)
       }
       pending_->result.set_value(r);
       pending_.reset();
+    }
+  }
+
+  // settle_freeze: freeze released plates once they have settled (checked every 20 ms sim)
+  if (!settling_.empty() && (d->time - last_settle_check_ >= 0.02 || d->time < last_settle_check_))
+  {
+    last_settle_check_ = d->time;
+    std::unique_lock<std::recursive_mutex> sim_lock;
+    if (sim_mutex_)
+    {
+      sim_lock = std::unique_lock<std::recursive_mutex>(*sim_mutex_);
+    }
+    mjData* pd = sim_mutex_ ? phys_data_ : d;
+    for (auto it = settling_.begin(); it != settling_.end();)
+    {
+      const mjtNum* v = pd->qvel + m->jnt_dofadr[m->body_jntadr[it->body]];
+      const bool still = mju_norm3(v) < settle_speed_ && mju_norm3(v + 3) < settle_spin_;
+      if (!still)
+      {
+        it->t_still = -1.0;
+      }
+      else if (it->t_still < 0)
+      {
+        it->t_still = pd->time;
+      }
+      if (still && pd->time - it->t_release >= settle_min_ && pd->time - it->t_still >= settle_hold_)
+      {
+        freeze_plate(m, pd, it->body);
+        const mjtNum* p = pd->xpos + 3 * it->body;
+        RCLCPP_INFO(logger_, "settle_freeze: %s settled %.2f s after release -> frozen at (%.4f, %.4f, %.4f)",
+                    mj_id2name(m, mjOBJ_BODY, it->body), pd->time - it->t_release, p[0], p[1], p[2]);
+        it = settling_.erase(it);
+      }
+      else
+      {
+        ++it;
+      }
     }
   }
 
