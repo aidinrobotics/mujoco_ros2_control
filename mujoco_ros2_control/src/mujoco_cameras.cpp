@@ -134,11 +134,31 @@ void MujocoCameras::register_cameras(const hardware_interface::HardwareInfo& har
     camera.camera_info.p.fill(0.0);
     camera.camera_info.d.resize(5, 0.0);
 
-    double focal_scaling = (1.0 / std::tan((cam_fovy * M_PI / 180.0) / 2.0)) * camera.height / 2.0;
-    camera.camera_info.k[0] = camera.camera_info.p[0] = focal_scaling;
-    camera.camera_info.k[2] = camera.camera_info.p[2] = static_cast<double>(camera.width) / 2.0;
-    camera.camera_info.k[4] = camera.camera_info.p[5] = focal_scaling;
-    camera.camera_info.k[5] = camera.camera_info.p[6] = static_cast<double>(camera.height) / 2.0;
+    // Intrinsics: MJCF sensorsize + focal/principal (cam_intrinsic, length units) when given, else fovy with the
+    // principal point at the image center. MuJoCo's principal offset has the opposite sign of the pixel shift:
+    // cx = W/2 - principal_x * W / sensor_w (verified by rendering against an OpenCV projection, within 1.4 px).
+    const float* sensor = mj_model_->cam_sensorsize + 2 * i;
+    const float* intr = mj_model_->cam_intrinsic + 4 * i;
+    double fx, fy, cx, cy;
+    if (sensor[0] > 0.0 && sensor[1] > 0.0)
+    {
+      const double sx = static_cast<double>(camera.width) / static_cast<double>(sensor[0]),
+                   sy = static_cast<double>(camera.height) / static_cast<double>(sensor[1]);
+      fx = intr[0] * sx;
+      fy = intr[1] * sy;
+      cx = camera.width / 2.0 - intr[2] * sx;
+      cy = camera.height / 2.0 - intr[3] * sy;
+    }
+    else
+    {
+      fx = fy = (1.0 / std::tan((cam_fovy * M_PI / 180.0) / 2.0)) * camera.height / 2.0;
+      cx = camera.width / 2.0;
+      cy = camera.height / 2.0;
+    }
+    camera.camera_info.k[0] = camera.camera_info.p[0] = fx;
+    camera.camera_info.k[2] = camera.camera_info.p[2] = cx;
+    camera.camera_info.k[4] = camera.camera_info.p[5] = fy;
+    camera.camera_info.k[5] = camera.camera_info.p[6] = cy;
     camera.camera_info.k[8] = camera.camera_info.p[10] = 1.0;
 
     // Add to list of cameras

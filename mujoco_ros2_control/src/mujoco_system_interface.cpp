@@ -1037,13 +1037,13 @@ hardware_interface::return_type MujocoSystemInterface::read(const rclcpp::Time& 
   // After all updates, snapshot the result into xfrc_plugin_desired_ — the physics loop reads
   // from there so mj_copyData's viewer-force contamination never reaches the plugin buffer.
   // TODO: Break this apart when mujoco data is separated
-  mju_zero(simulation_->control_data()->xfrc_applied, 6 * simulation_->model()->nbody);
+  mju_zero(simulation_->control_data()->xfrc_applied, 6 * static_cast<int>(simulation_->model()->nbody));
   for (auto& plugin : plugin_instances_)
   {
     plugin->update(simulation_->model(), simulation_->control_data());
   }
   mju_copy(simulation_->xfrc_plugin_desired().data(), simulation_->control_data()->xfrc_applied,
-           6 * simulation_->model()->nbody);
+           6 * static_cast<int>(simulation_->model()->nbody));
 
   // Diagnostic: publish world-frame poses of registered MJCF sites so the
   // caller can diff against URDF FK (TF) for the same joint configuration.
@@ -2121,9 +2121,9 @@ bool MujocoSystemInterface::set_override_start_positions(const std::string& over
   {
     RCLCPP_ERROR(get_logger(),
                  "Mismatch in data types in override starting positions. Numbers are:\n\t"
-                 "qpos size in file: %zu, qpos size in model: %d\n\t"
-                 "qvel size in file: %zu, qvel size in model: %d\n\t"
-                 "ctrl size in file: %zu, ctrl size in model: %d",
+                 "qpos size in file: %zu, qpos size in model: %ld\n\t"
+                 "qvel size in file: %zu, qvel size in model: %ld\n\t"
+                 "ctrl size in file: %zu, ctrl size in model: %ld",
                  qpos.size(), simulation_->model()->nq, qvel.size(), simulation_->model()->nv, ctrl.size(),
                  simulation_->model()->nu);
     return false;
