@@ -530,10 +530,24 @@ void MagnetGripperPlugin::update(const mjModel* m, mjData* d)
       sim_lock = std::unique_lock<std::recursive_mutex>(*sim_mutex_);
     }
     mjData* pd = sim_mutex_ ? phys_data_ : d;
+    // A plate still touched by the robot that put it down is not settled: right after magnet OFF the gripper is still
+    // on it (or, resting on a pallet lip, holds it up by contact) — freezing then kept it where the face was, 5 mm above
+    // its support (RC cell 2026-11-11, s202 ga1_05). Only count stillness once no 220 body touches the plate.
+    const int robot_root = gripper_body_ >= 0 ? m->body_rootid[gripper_body_] : -1;
+    auto touched_by_robot = [&](int body) {
+      for (int i = 0; i < pd->ncon; ++i)
+      {
+        const int b1 = m->geom_bodyid[pd->contact[i].geom1], b2 = m->geom_bodyid[pd->contact[i].geom2];
+        if ((b1 == body && m->body_rootid[b2] == robot_root) || (b2 == body && m->body_rootid[b1] == robot_root))
+          return true;
+      }
+      return false;
+    };
     for (auto it = settling_.begin(); it != settling_.end();)
     {
       const mjtNum* v = pd->qvel + m->jnt_dofadr[m->body_jntadr[it->body]];
-      const bool still = mju_norm3(v) < settle_speed_ && mju_norm3(v + 3) < settle_spin_;
+      const bool still = mju_norm3(v) < settle_speed_ && mju_norm3(v + 3) < settle_spin_ &&
+                         !(robot_root >= 0 && touched_by_robot(it->body));
       if (!still)
       {
         it->t_still = -1.0;
@@ -623,7 +637,11 @@ std::vector<MagnetGripperPlugin::CellHit> MagnetGripperPlugin::cast_cells(const 
       half += m->geom_size[3 * c + i] * std::abs(cx[i] * dir[0] + cx[3 + i] * dir[1] + cx[6 + i] * dir[2]);
     }
     int hit = -1;
+#if mjVERSION_HEADER > 340   // mj_ray 의 normal 출력 인자 (3.4.0 에는 없음)
     const mjtNum dist = mj_ray(m, scratch_, scratch_->geom_xpos + 3 * c, dir, nullptr, 1, gripper_body_, &hit, nullptr);
+#else
+    const mjtNum dist = mj_ray(m, scratch_, scratch_->geom_xpos + 3 * c, dir, nullptr, 1, gripper_body_, &hit);
+#endif
     if (hit >= 0 && dist >= 0)
     {
       out[k].body = m->geom_bodyid[hit];
