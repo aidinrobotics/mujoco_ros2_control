@@ -147,7 +147,14 @@ void MujocoCameras::register_cameras(const hardware_interface::HardwareInfo& har
       fx = intr[0] * sx;
       fy = intr[1] * sy;
       cx = camera.width / 2.0 - intr[2] * sx;
+#if mjVERSION_HEADER > 340
       cy = camera.height / 2.0 - intr[3] * sy;
+#else
+      // MuJoCo 3.4.0 renders the vertical principal offset with the same sign as the pixel shift (horizontal is as
+      // above). Measured 2026-11-12 (L18): with the opposite sign the cloud was shifted in y by 25.5 px * depth / f
+      // (33 mm at 1.98 m, 39 mm at 2.37 m) against the true geometry, x was exact.
+      cy = camera.height / 2.0 + intr[3] * sy;
+#endif
     }
     else
     {

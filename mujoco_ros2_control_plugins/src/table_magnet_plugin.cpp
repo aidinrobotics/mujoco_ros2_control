@@ -237,7 +237,11 @@ std::pair<bool, std::string> TableMagnetPlugin::hold(const mjModel* m, mjData* d
         origin[i] = P[i] + 0.001 * Z[i] + o[0] * X[i] + o[1] * Y[i];
       }
       int hit = -1;
+#if mjVERSION_HEADER > 340   // mj_ray 의 normal 출력 인자 (3.4.0 에는 없음)
       const mjtNum dist = mj_ray(m, scratch_, origin, Z, nullptr, 1, post_parent_[k], &hit, nullptr);
+#else
+      const mjtNum dist = mj_ray(m, scratch_, origin, Z, nullptr, 1, post_parent_[k], &hit);
+#endif
       if (hit < 0 || dist < 0 || dist > attach_distance_)
       {
         continue;
