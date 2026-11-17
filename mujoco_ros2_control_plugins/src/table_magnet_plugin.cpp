@@ -360,7 +360,32 @@ std::pair<bool, std::string> TableMagnetPlugin::clear(const mjModel* m, mjData* 
 
 std::pair<bool, std::string> TableMagnetPlugin::park(const mjModel* m, mjData* d, const std::string& name)
 {
-  const int b = mj_name2id(m, mjOBJ_BODY, (plate_prefix_ + name).c_str());
+  int b = mj_name2id(m, mjOBJ_BODY, (plate_prefix_ + name).c_str());
+  if (b < 0)
+  {
+    // 같은 종류 판이 여러 장인 장면은 몸 이름이 '<종류>#<번호>' — 계산 노드는 종류 이름만 앎.
+    // 아직 안 치웠고 (contype 32 = 치운 판) 잡히지 않은 같은 종류 판 중 가장 높은 판 (맨 위 = 입고 잡기 대상)
+    const std::string stem = plate_prefix_ + name + "#";
+    mjtNum best_z = -std::numeric_limits<mjtNum>::infinity();
+    for (std::size_t i = 0; i < plate_bodies_.size(); ++i)
+    {
+      const int pb = plate_bodies_[i];
+      const char* nm = mj_id2name(m, mjOBJ_BODY, pb);
+      if (!nm || std::string(nm).rfind(stem, 0) != 0 || m->body_contype[pb] == 32)
+      {
+        continue;
+      }
+      if (phys_data_->eq_active[table_eq_[i]] || (gripper_eq_[i] >= 0 && phys_data_->eq_active[gripper_eq_[i]]))
+      {
+        continue;
+      }
+      if (d->xpos[3 * pb + 2] > best_z)
+      {
+        best_z = d->xpos[3 * pb + 2];
+        b = pb;
+      }
+    }
+  }
   const auto it = std::find(plate_bodies_.begin(), plate_bodies_.end(), b);
   if (b < 0 || it == plate_bodies_.end())
   {
