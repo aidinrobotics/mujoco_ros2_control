@@ -352,6 +352,8 @@ MujocoSystemInterface::on_init(const hardware_interface::HardwareComponentInterf
   // dynamic 2nd-order lag from kp/kv/inertia stays on top of this shift.
   command_delay_ms_ =
       std::stod(get_hardware_parameter(get_hardware_info(), "command_delay_ms").value_or("0.0"));
+  ft_lowpass_hz_ = std::stod(get_hardware_parameter(get_hardware_info(), "ft_lowpass_hz").value_or("0.0"));
+  ft_delay_ms_ = std::stod(get_hardware_parameter(get_hardware_info(), "ft_delay_ms").value_or("0.0"));
 
   // Construct and start the ROS node spinning
   /// The PIDs config file
@@ -925,7 +927,7 @@ MujocoSystemInterface::perform_command_mode_switch(const std::vector<std::string
   return hardware_interface::return_type::OK;
 }
 
-hardware_interface::return_type MujocoSystemInterface::read(const rclcpp::Time& time, const rclcpp::Duration& /*period*/)
+hardware_interface::return_type MujocoSystemInterface::read(const rclcpp::Time& time, const rclcpp::Duration& period)
 {
   // Joint states
   actuator_state_msg_.header.stamp = time;
@@ -982,21 +984,50 @@ hardware_interface::return_type MujocoSystemInterface::read(const rclcpp::Time& 
   const double f_step = ft_quant_force_;
   const double t_step = ft_quant_torque_;
   auto sample_noise = [&](double std) { return std > 0.0 ? std * ft_noise_dist_(ft_noise_rng_) : 0.0; };
+  // noise -> low-pass -> delay -> quantize
+  const double dt = period.seconds();
+  const double alpha = (ft_lowpass_hz_ > 0.0 && dt > 0.0) ? dt / (dt + 1.0 / (2.0 * M_PI * ft_lowpass_hz_)) : 1.0;
+  if (ft_delay_ms_ > 0.0 && !ft_delay_buffers_ready_ && dt > 0.0)
+  {
+    const auto steps = static_cast<std::size_t>(std::ceil(ft_delay_ms_ * 1e-3 / dt));
+    for (auto& data : ft_sensor_data_)
+    {
+      data.delay_buffer.assign(steps, data.filtered);
+      data.delay_idx = 0;
+    }
+    ft_delay_buffers_ready_ = true;
+    RCLCPP_INFO(get_logger(), "F/T delay %.2f ms = %zu control cycles of %.2f ms", ft_delay_ms_, steps, dt * 1e3);
+  }
+  const mjtNum* sensordata = simulation_->control_data()->sensordata;
   for (auto& data : ft_sensor_data_)
   {
-    data.force.data.x() =
-        quantize(-simulation_->control_data()->sensordata[data.force.mj_sensor_index] + sample_noise(f_std), f_step);
-    data.force.data.y() =
-        quantize(-simulation_->control_data()->sensordata[data.force.mj_sensor_index + 1] + sample_noise(f_std), f_step);
-    data.force.data.z() =
-        quantize(-simulation_->control_data()->sensordata[data.force.mj_sensor_index + 2] + sample_noise(f_std), f_step);
-
-    data.torque.data.x() =
-        quantize(-simulation_->control_data()->sensordata[data.torque.mj_sensor_index] + sample_noise(t_std), t_step);
-    data.torque.data.y() =
-        quantize(-simulation_->control_data()->sensordata[data.torque.mj_sensor_index + 1] + sample_noise(t_std), t_step);
-    data.torque.data.z() =
-        quantize(-simulation_->control_data()->sensordata[data.torque.mj_sensor_index + 2] + sample_noise(t_std), t_step);
+    Eigen::Matrix<double, 6, 1> w;
+    for (int i = 0; i < 3; ++i)
+    {
+      w[i] = -sensordata[data.force.mj_sensor_index + i] + sample_noise(f_std);
+      w[3 + i] = -sensordata[data.torque.mj_sensor_index + i] + sample_noise(t_std);
+    }
+    if (!data.filter_ready)
+    {
+      data.filtered = w;
+      data.filter_ready = true;
+      for (auto& slot : data.delay_buffer)
+      {
+        slot = w;
+      }
+    }
+    data.filtered += alpha * (w - data.filtered);
+    w = data.filtered;
+    if (!data.delay_buffer.empty())
+    {
+      std::swap(w, data.delay_buffer[data.delay_idx]);
+      data.delay_idx = (data.delay_idx + 1) % data.delay_buffer.size();
+    }
+    for (int i = 0; i < 3; ++i)
+    {
+      data.force.data[i] = quantize(w[i], f_step);
+      data.torque.data[i] = quantize(w[3 + i], t_step);
+    }
   }
 
   // Publish Odometry
@@ -2226,6 +2257,17 @@ void MujocoSystemInterface::reset_simulation_state(bool /*fill_initial_state*/)
     joint.position_interface.command_ = joint.position_interface.state_;
     joint.velocity_interface.command_ = 0.0;
     joint.effort_interface.command_ = 0.0;
+  }
+
+  // Plugins put back the model fields and eq_active they changed
+  if (!plugin_instances_.empty())
+  {
+    for (auto& plugin : plugin_instances_)
+    {
+      plugin->reset(simulation_->model(), simulation_->data());
+    }
+    mj_forward(simulation_->model(), simulation_->data());
+    mj_copyData(simulation_->control_data(), simulation_->model(), simulation_->data());
   }
 }
 

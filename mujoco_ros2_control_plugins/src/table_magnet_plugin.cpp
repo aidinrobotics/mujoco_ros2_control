@@ -132,6 +132,10 @@ bool TableMagnetPlugin::init(rclcpp::Node::SharedPtr node, const mjModel* m, mjD
     table_eq_.push_back(eq);
     gripper_eq_.push_back(mj_name2id(m, mjOBJ_EQUALITY, (grip_prefix + n).c_str()));
   }
+  for (const int eq : table_eq_)
+  {
+    start_eq_.push_back({ eq, data->eq_active[eq] });
+  }
 
   using Trigger = std_srvs::srv::Trigger;
   auto bind = [this](Cmd c) {
@@ -400,6 +404,10 @@ std::pair<bool, std::string> TableMagnetPlugin::park(const mjModel* m, mjData* d
 
 void TableMagnetPlugin::update(const mjModel* m, mjData* d)
 {
+  if (reset_pending_.exchange(false))
+  {
+    held_.clear();
+  }
   {
     std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
     if (lock.owns_lock() && pending_)
@@ -461,6 +469,18 @@ void TableMagnetPlugin::update(const mjModel* m, mjData* d)
     msg.data = held_names(m);
     state_pub_->publish(msg);
   }
+}
+
+void TableMagnetPlugin::reset(const mjModel* /*m*/, mjData* d)
+{
+  for (const auto& [eq, active] : start_eq_)
+  {
+    d->eq_active[eq] = active;
+  }
+  g_parked = 0;
+  g_parked_in = 0;
+  reset_pending_ = true;
+  RCLCPP_INFO(logger_, "TableMagnetPlugin: world reset -> table welds back to the start, park slots 0");
 }
 
 void TableMagnetPlugin::cleanup()
