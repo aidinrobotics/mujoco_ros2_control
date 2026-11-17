@@ -65,6 +65,18 @@ public:
   virtual void cleanup() = 0;
 
   /**
+   * @brief Called after the world was reset (reset_world service), with the simulation mutex held
+   * @param model Pointer to the MuJoCo model
+   * @param data Pointer to the physics mjData, already at the reset state
+   * @note Puts back what the plugin changed in the model, or in data fields the reset does not restore (e.g.
+   * eq_active). State the plugin keeps for update() is cleared on the next update(), which runs in another thread.
+   * The default does nothing.
+   */
+  virtual void reset(const mjModel* /*model*/, mjData* /*data*/)
+  {
+  }
+
+  /**
    * @brief Give the plugin the simulation mutex (held by the physics thread while it steps).
    * @note update() runs in the control thread without it. A plugin that changes the physics mjData or the model in a
    * way mj_step must not see half-done (e.g. toggling eq_active between constraint counting and allocation) locks it

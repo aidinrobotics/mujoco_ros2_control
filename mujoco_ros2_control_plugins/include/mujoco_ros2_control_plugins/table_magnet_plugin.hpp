@@ -15,10 +15,12 @@
 #ifndef MUJOCO_ROS2_CONTROL_PLUGINS__TABLE_MAGNET_PLUGIN_HPP_
 #define MUJOCO_ROS2_CONTROL_PLUGINS__TABLE_MAGNET_PLUGIN_HPP_
 
+#include <atomic>
 #include <future>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <rclcpp/rclcpp.hpp>
@@ -64,6 +66,9 @@ public:
   bool init(rclcpp::Node::SharedPtr node, const mjModel* model, mjData* data) override;
   void update(const mjModel* model, mjData* data) override;
   void cleanup() override;
+  // Table welds back to their eq_active at init and the park slots to 0; the held list is cleared on the next
+  // update().
+  void reset(const mjModel* model, mjData* data) override;
 
 private:
   enum class Cmd
@@ -113,6 +118,8 @@ private:
 
   std::vector<Held> held_;  // update() thread only
   mjData* phys_data_{ nullptr };
+  std::vector<std::pair<int, mjtByte>> start_eq_;   // table welds and their eq_active at init, put back by reset()
+  std::atomic<bool> reset_pending_{ false };        // update() clears held_
   mjData* scratch_{ nullptr };
 
   std::mutex mutex_;

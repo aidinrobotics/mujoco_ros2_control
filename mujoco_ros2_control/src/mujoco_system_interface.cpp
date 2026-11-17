@@ -2258,6 +2258,17 @@ void MujocoSystemInterface::reset_simulation_state(bool /*fill_initial_state*/)
     joint.velocity_interface.command_ = 0.0;
     joint.effort_interface.command_ = 0.0;
   }
+
+  // Plugins put back the model fields and eq_active they changed
+  if (!plugin_instances_.empty())
+  {
+    for (auto& plugin : plugin_instances_)
+    {
+      plugin->reset(simulation_->model(), simulation_->data());
+    }
+    mj_forward(simulation_->model(), simulation_->data());
+    mj_copyData(simulation_->control_data(), simulation_->model(), simulation_->data());
+  }
 }
 
 void MujocoSystemInterface::get_model(mjModel*& dest)

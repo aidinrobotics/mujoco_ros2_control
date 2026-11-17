@@ -15,6 +15,7 @@
 #ifndef MUJOCO_ROS2_CONTROL_PLUGINS__MAGNET_GRIPPER_PLUGIN_HPP_
 #define MUJOCO_ROS2_CONTROL_PLUGINS__MAGNET_GRIPPER_PLUGIN_HPP_
 
+#include <atomic>
 #include <future>
 #include <mutex>
 #include <optional>
@@ -85,6 +86,9 @@ public:
   bool init(rclcpp::Node::SharedPtr node, const mjModel* model, mjData* data) override;
   void update(const mjModel* model, mjData* data) override;
   void cleanup() override;
+  // Plates back to their contact bits, gravcomp and welds at init; the held plate, settling and frozen lists are
+  // cleared on the next update().
+  void reset(const mjModel* model, mjData* data) override;
 
 private:
   enum class Cmd
@@ -163,6 +167,25 @@ private:
   int carried_eq_{ -1 };
   std::vector<int> plate_eq_;     // weld "magnet/<plate>" per plate_bodies_ entry
   mjData* phys_data_{ nullptr };
+
+  // plate state at init, put back by reset()
+  struct GeomStart
+  {
+    int geom;
+    int contype;
+    int conaffinity;
+  };
+  struct BodyStart
+  {
+    int body;
+    int contype;
+    int conaffinity;
+    mjtNum gravcomp;
+  };
+  std::vector<GeomStart> start_geoms_;
+  std::vector<BodyStart> start_bodies_;
+  std::vector<std::pair<int, mjtByte>> start_eq_;   // plate welds (magnet/, frozen weld) and their eq_active
+  std::atomic<bool> reset_pending_{ false };        // update() clears the held plate and its lists
 
   std::mutex mutex_;
   std::optional<Request> pending_;

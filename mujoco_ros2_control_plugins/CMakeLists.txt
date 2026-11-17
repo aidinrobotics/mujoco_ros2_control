@@ -95,6 +95,18 @@ if(BUILD_TESTING)
     "LINKER:--pop-state"
   )
 
+  ament_add_gtest(test_magnet_reset
+    test/test_magnet_reset.cpp
+  )
+  target_link_libraries(test_magnet_reset
+    mujoco_ros2_control_plugins
+  )
+  target_link_options(test_magnet_reset PUBLIC
+    "LINKER:--push-state,--no-as-needed"
+    "$<TARGET_LINKER_FILE:tinyxml2::tinyxml2>"
+    "LINKER:--pop-state"
+  )
+
 endif()
 
 # Install include directory

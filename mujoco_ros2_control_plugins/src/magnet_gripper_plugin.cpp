@@ -151,6 +151,27 @@ bool MagnetGripperPlugin::init(rclcpp::Node::SharedPtr node, const mjModel* m, m
       plate_eq_.push_back(eq);
     }
   }
+  for (std::size_t i = 0; i < plate_bodies_.size(); ++i)
+  {
+    const int b = plate_bodies_[i];
+    start_bodies_.push_back({ b, m->body_contype[b], m->body_conaffinity[b], m->body_gravcomp[b] });
+    for (int g = 0; g < m->ngeom; ++g)
+    {
+      if (m->geom_bodyid[g] == b)
+      {
+        start_geoms_.push_back({ g, m->geom_contype[g], m->geom_conaffinity[g] });
+      }
+    }
+    start_eq_.push_back({ plate_eq_[i], data->eq_active[plate_eq_[i]] });
+    if (!frozen_weld_prefix_.empty())
+    {
+      const int weq = mj_name2id(m, mjOBJ_EQUALITY, (frozen_weld_prefix_ + mj_id2name(m, mjOBJ_BODY, b)).c_str());
+      if (weq >= 0)
+      {
+        start_eq_.push_back({ weq, data->eq_active[weq] });
+      }
+    }
+  }
 
   on_srv_ = node_->create_service<std_srvs::srv::Trigger>(
       on_name, [this](const std::shared_ptr<std_srvs::srv::Trigger::Request>,
@@ -489,6 +510,17 @@ std::pair<bool, std::string> MagnetGripperPlugin::release(const mjModel* m)
 
 void MagnetGripperPlugin::update(const mjModel* m, mjData* d)
 {
+  if (reset_pending_.exchange(false))
+  {
+    carried_ = -1;
+    carried_eq_ = -1;
+    settling_.clear();
+    frozen_welds_.clear();
+    warned_.clear();
+    on_plate_text_.clear();
+    warn_text_.clear();
+    spring_max_ = 0.0;
+  }
   {
     std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
     if (lock.owns_lock() && pending_)
@@ -731,6 +763,29 @@ std::pair<bool, std::string> MagnetGripperPlugin::set_channels(const mjModel* m,
   }
   RCLCPP_INFO(logger_, "magnet cells: %s", msg.c_str());
   return { true, msg };
+}
+
+void MagnetGripperPlugin::reset(const mjModel* m, mjData* d)
+{
+  auto* mm = const_cast<mjModel*>(m);
+  for (const auto& g : start_geoms_)
+  {
+    mm->geom_contype[g.geom] = g.contype;
+    mm->geom_conaffinity[g.geom] = g.conaffinity;
+  }
+  for (const auto& b : start_bodies_)
+  {
+    mm->body_contype[b.body] = b.contype;
+    mm->body_conaffinity[b.body] = b.conaffinity;
+    mm->body_gravcomp[b.body] = b.gravcomp;
+  }
+  for (const auto& [eq, active] : start_eq_)
+  {
+    d->eq_active[eq] = active;
+  }
+  reset_pending_ = true;
+  RCLCPP_INFO(logger_, "MagnetGripperPlugin: world reset -> %zu plates back to their contacts, gravcomp and welds at start",
+              start_bodies_.size());
 }
 
 void MagnetGripperPlugin::cleanup()
